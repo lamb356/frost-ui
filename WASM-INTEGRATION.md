@@ -12,6 +12,37 @@ This document describes the integration of real FROST cryptographic operations v
 | WASM build | ⚠️ Requires Setup | See build instructions |
 | Integration | 🔄 Partial | Falls back to mock if WASM unavailable |
 
+## Important: Curve Compatibility
+
+> **Note:** The current implementation uses **frost-ed25519** (Ed25519 curve) for demonstration and testing purposes. This is intentional and NOT a bug.
+
+**For production Zcash usage, the following changes are required:**
+
+| Zcash Pool | Required Crate | Curve |
+|------------|----------------|-------|
+| Orchard (NU5+) | `frost-rerandomized` | RedPallas (Pasta curves) |
+| Sapling | `frost-rerandomized` | Jubjub |
+| Transparent | `frost-secp256k1` | secp256k1 |
+
+**Why Ed25519 for now:**
+1. It's stable and well-tested in the frost crate ecosystem
+2. The API is identical across curves - switching is a one-line change
+3. Allows UI development to proceed without waiting for curve-specific issues
+4. `frost-rerandomized` requires additional work for WASM compatibility
+
+**Migration path:**
+```rust
+// Current (demo):
+use frost_ed25519 as frost;
+
+// Production (Orchard):
+use frost_rerandomized as frost;
+```
+
+The TypeScript interface remains unchanged - only the Rust crate dependency changes.
+
+This is documented as **future work** and is not a blocker for the UI grant.
+
 ## Architecture
 
 ```
@@ -280,10 +311,8 @@ module.exports = nextConfig;
 ### 2. Zcash Curve Support
 
 **Issue:** Currently using Ed25519, not Zcash's curves
-**Status:** Ed25519 is for demonstration; production needs:
-- `frost-rerandomized` for Sapling
-- `frost-secp256k1` for transparent
-**Impact:** Signatures won't work with real Zcash
+**Status:** Ed25519 is for demonstration - see "Curve Compatibility" section above
+**Impact:** Demo signatures work, but won't work with real Zcash until curves are swapped
 
 ### 3. Key Package Serialization
 

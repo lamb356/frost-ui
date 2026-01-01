@@ -120,6 +120,10 @@ export function getWasmError(): Error | null {
 /**
  * Load the FROST WASM module.
  * Returns a promise that resolves when the module is ready.
+ *
+ * Note: The WASM module is built by CI and may not exist during local development.
+ * If the module is not available, this will throw an error and the caller
+ * should fall back to the mock implementation.
  */
 export async function loadFrostWasm(): Promise<FrostWasmModule> {
   // Already loaded
@@ -137,7 +141,9 @@ export async function loadFrostWasm(): Promise<FrostWasmModule> {
     try {
       // Dynamic import of the WASM module
       // The module should be built with wasm-pack and placed in the pkg directory
-      const wasm = await import('./pkg/frost_wasm');
+      // Using a variable to prevent static analysis from failing the build
+      const modulePath = './pkg/frost_wasm';
+      const wasm = await import(/* webpackIgnore: true */ modulePath);
 
       // Initialize the WASM module (if there's an init function)
       if (typeof wasm.default === 'function') {

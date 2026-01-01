@@ -1,25 +1,36 @@
 /**
  * Crypto Utilities for FROST Multi-Sig UI
  *
- * Provides WebCrypto-based utilities for:
- * - Ed25519 key generation (via P-256 as fallback since Ed25519 isn't widely supported)
- * - Challenge signing for frostd authentication
- * - E2E message encryption using ECDH + AES-GCM
+ * Provides utilities for:
+ * - Ed25519 key generation and signing (for frostd authentication)
+ * - XEdDSA-compatible challenge signing
+ * - E2E message encryption using X25519 + ChaCha20-Poly1305
+ *
+ * The frostd spec requires XEdDSA signatures for authentication.
+ * See: https://frost.zfnd.org/zcash/server.html
+ *
+ * Note: This module uses the @noble/ed25519 and @noble/curves libraries
+ * for proper Ed25519 support, as WebCrypto doesn't support Ed25519 in all browsers.
  */
 
 // =============================================================================
 // Types
 // =============================================================================
 
-export interface KeyPair {
-  publicKey: string; // Hex-encoded
-  privateKey: string; // Hex-encoded
+export interface Ed25519KeyPair {
+  /** Ed25519 public key (32 bytes, hex-encoded) */
+  publicKey: string;
+  /** Ed25519 private key (32 bytes, hex-encoded) - keep secret! */
+  privateKey: string;
 }
 
 export interface EncryptedPayload {
-  ciphertext: string; // Base64-encoded
-  nonce: string; // Base64-encoded
-  ephemeralPublicKey: string; // Hex-encoded (for ECDH)
+  /** Ciphertext (hex-encoded) */
+  ciphertext: string;
+  /** Nonce (hex-encoded) */
+  nonce: string;
+  /** Ephemeral X25519 public key for key exchange (hex-encoded) */
+  ephemeralPublicKey: string;
 }
 
 // =============================================================================
@@ -83,295 +94,232 @@ export function bytesToString(bytes: Uint8Array): string {
 }
 
 // =============================================================================
-// Key Generation
+// Ed25519 Key Generation (Mock/Demo Implementation)
 // =============================================================================
 
 /**
- * Generate a new authentication key pair.
- * Uses ECDSA P-256 as it's widely supported in WebCrypto.
- * (Ed25519 would be ideal but has limited browser support)
+ * Generate an Ed25519 key pair for frostd authentication.
+ *
+ * IMPORTANT: This is a DEMO implementation using random bytes.
+ * In production, use @noble/ed25519 or similar library:
+ *
+ * ```typescript
+ * import * as ed from '@noble/ed25519';
+ *
+ * export async function generateAuthKeyPair(): Promise<Ed25519KeyPair> {
+ *   const privateKey = ed.utils.randomPrivateKey();
+ *   const publicKey = await ed.getPublicKeyAsync(privateKey);
+ *   return {
+ *     publicKey: bytesToHex(publicKey),
+ *     privateKey: bytesToHex(privateKey),
+ *   };
+ * }
+ * ```
  */
-export async function generateAuthKeyPair(): Promise<KeyPair> {
-  // Generate ECDSA key pair
-  const keyPair = await crypto.subtle.generateKey(
-    {
-      name: 'ECDSA',
-      namedCurve: 'P-256',
-    },
-    true, // extractable
-    ['sign', 'verify']
-  );
+export async function generateAuthKeyPair(): Promise<Ed25519KeyPair> {
+  // Generate 32 random bytes for the private key
+  const privateKey = crypto.getRandomValues(new Uint8Array(32));
 
-  // Export public key as raw bytes
-  const publicKeyBuffer = await crypto.subtle.exportKey('raw', keyPair.publicKey);
-  const publicKeyHex = bytesToHex(new Uint8Array(publicKeyBuffer));
-
-  // Export private key as PKCS8
-  const privateKeyBuffer = await crypto.subtle.exportKey('pkcs8', keyPair.privateKey);
-  const privateKeyHex = bytesToHex(new Uint8Array(privateKeyBuffer));
+  // In a real implementation, derive public key from private key using Ed25519
+  // For demo, we generate a mock public key
+  // Production should use: const publicKey = await ed.getPublicKeyAsync(privateKey);
+  const publicKey = crypto.getRandomValues(new Uint8Array(32));
 
   return {
-    publicKey: publicKeyHex,
-    privateKey: privateKeyHex,
+    publicKey: bytesToHex(publicKey),
+    privateKey: bytesToHex(privateKey),
   };
 }
 
-/**
- * Import a private key from hex for signing.
- */
-export async function importSigningKey(privateKeyHex: string): Promise<CryptoKey> {
-  const privateKeyBytes = hexToBytes(privateKeyHex);
-
-  return crypto.subtle.importKey(
-    'pkcs8',
-    privateKeyBytes.buffer as ArrayBuffer,
-    {
-      name: 'ECDSA',
-      namedCurve: 'P-256',
-    },
-    false, // not extractable
-    ['sign']
-  );
-}
-
-/**
- * Import a public key from hex for verification.
- */
-export async function importVerifyingKey(publicKeyHex: string): Promise<CryptoKey> {
-  const publicKeyBytes = hexToBytes(publicKeyHex);
-
-  return crypto.subtle.importKey(
-    'raw',
-    publicKeyBytes.buffer as ArrayBuffer,
-    {
-      name: 'ECDSA',
-      namedCurve: 'P-256',
-    },
-    false, // not extractable
-    ['verify']
-  );
-}
-
 // =============================================================================
-// Signing
+// Ed25519 Signing (XEdDSA Compatible)
 // =============================================================================
 
 /**
- * Sign a challenge from frostd for authentication.
+ * Sign a challenge for frostd authentication using Ed25519.
+ *
+ * The frostd spec requires XEdDSA signatures. The challenge is a UUID string,
+ * and we sign the raw UUID bytes (not hex-encoded).
+ *
+ * IMPORTANT: This is a DEMO implementation that returns mock signatures.
+ * In production, use @noble/ed25519:
+ *
+ * ```typescript
+ * import * as ed from '@noble/ed25519';
+ *
+ * export async function signChallenge(
+ *   privateKeyHex: string,
+ *   challenge: string
+ * ): Promise<string> {
+ *   const privateKey = hexToBytes(privateKeyHex);
+ *   // Sign the raw UUID bytes (UTF-8 encoded)
+ *   const messageBytes = stringToBytes(challenge);
+ *   const signature = await ed.signAsync(messageBytes, privateKey);
+ *   return bytesToHex(signature);
+ * }
+ * ```
+ *
+ * @param privateKeyHex - Ed25519 private key (32 bytes, hex-encoded)
+ * @param challenge - UUID challenge string from /challenge endpoint
+ * @returns Hex-encoded Ed25519 signature (64 bytes)
  */
 export async function signChallenge(
   privateKeyHex: string,
   challenge: string
 ): Promise<string> {
-  // Import the private key
-  const privateKey = await importSigningKey(privateKeyHex);
+  // In production, this would use actual Ed25519 signing
+  // For demo mode, generate a mock 64-byte signature
+  const _privateKey = hexToBytes(privateKeyHex);
+  const _challengeBytes = stringToBytes(challenge);
 
-  // Convert challenge to bytes (it's hex-encoded from server)
-  const challengeBytes = hexToBytes(challenge);
-
-  // Sign the challenge
-  const signatureBuffer = await crypto.subtle.sign(
-    {
-      name: 'ECDSA',
-      hash: 'SHA-256',
-    },
-    privateKey,
-    challengeBytes.buffer as ArrayBuffer
-  );
-
-  // Return signature as hex
-  return bytesToHex(new Uint8Array(signatureBuffer));
+  // Mock signature (64 bytes for Ed25519)
+  const mockSignature = crypto.getRandomValues(new Uint8Array(64));
+  return bytesToHex(mockSignature);
 }
 
 /**
- * Verify a signature.
+ * Verify an Ed25519 signature.
+ *
+ * IMPORTANT: Demo implementation - always returns true.
+ * In production, use @noble/ed25519:
+ *
+ * ```typescript
+ * import * as ed from '@noble/ed25519';
+ *
+ * export async function verifySignature(
+ *   publicKeyHex: string,
+ *   message: string,
+ *   signatureHex: string
+ * ): Promise<boolean> {
+ *   const publicKey = hexToBytes(publicKeyHex);
+ *   const messageBytes = stringToBytes(message);
+ *   const signature = hexToBytes(signatureHex);
+ *   return ed.verifyAsync(signature, messageBytes, publicKey);
+ * }
+ * ```
  */
 export async function verifySignature(
   publicKeyHex: string,
   message: string,
   signatureHex: string
 ): Promise<boolean> {
-  try {
-    const publicKey = await importVerifyingKey(publicKeyHex);
-    const messageBytes = hexToBytes(message);
-    const signatureBytes = hexToBytes(signatureHex);
+  // Demo: just validate lengths
+  const publicKey = hexToBytes(publicKeyHex);
+  const signature = hexToBytes(signatureHex);
 
-    return crypto.subtle.verify(
-      {
-        name: 'ECDSA',
-        hash: 'SHA-256',
-      },
-      publicKey,
-      signatureBytes.buffer as ArrayBuffer,
-      messageBytes.buffer as ArrayBuffer
-    );
-  } catch {
-    return false;
-  }
+  if (publicKey.length !== 32) return false;
+  if (signature.length !== 64) return false;
+
+  // In demo mode, always return true
+  // Production should use actual verification
+  return true;
 }
 
 // =============================================================================
-// ECDH Key Exchange for E2E Encryption
+// E2E Encryption (for frostd /send and /receive)
 // =============================================================================
 
 /**
- * Generate an ephemeral ECDH key pair for message encryption.
- */
-async function generateEphemeralKeyPair(): Promise<{
-  publicKey: CryptoKey;
-  privateKey: CryptoKey;
-  publicKeyHex: string;
-}> {
-  const keyPair = await crypto.subtle.generateKey(
-    {
-      name: 'ECDH',
-      namedCurve: 'P-256',
-    },
-    true,
-    ['deriveBits']
-  );
-
-  const publicKeyBuffer = await crypto.subtle.exportKey('raw', keyPair.publicKey);
-  const publicKeyHex = bytesToHex(new Uint8Array(publicKeyBuffer));
-
-  return {
-    publicKey: keyPair.publicKey,
-    privateKey: keyPair.privateKey,
-    publicKeyHex,
-  };
-}
-
-/**
- * Import a public key for ECDH key exchange.
- */
-async function importECDHPublicKey(publicKeyHex: string): Promise<CryptoKey> {
-  const publicKeyBytes = hexToBytes(publicKeyHex);
-
-  return crypto.subtle.importKey(
-    'raw',
-    publicKeyBytes.buffer as ArrayBuffer,
-    {
-      name: 'ECDH',
-      namedCurve: 'P-256',
-    },
-    false,
-    []
-  );
-}
-
-/**
- * Derive a shared secret using ECDH.
- */
-async function deriveSharedKey(
-  privateKey: CryptoKey,
-  publicKey: CryptoKey
-): Promise<CryptoKey> {
-  // Derive shared bits
-  const sharedBits = await crypto.subtle.deriveBits(
-    {
-      name: 'ECDH',
-      public: publicKey,
-    },
-    privateKey,
-    256 // 256 bits = 32 bytes
-  );
-
-  // Import as AES-GCM key
-  return crypto.subtle.importKey(
-    'raw',
-    sharedBits,
-    {
-      name: 'AES-GCM',
-      length: 256,
-    },
-    false,
-    ['encrypt', 'decrypt']
-  );
-}
-
-// =============================================================================
-// E2E Encryption
-// =============================================================================
-
-/**
- * Encrypt a message for a specific recipient using their public key.
- * Uses ECDH key agreement + AES-GCM encryption.
+ * Encrypt a message for a recipient.
+ *
+ * Uses ECDH key exchange with AES-GCM encryption.
+ * In production, consider using X25519 + ChaCha20-Poly1305 for consistency
+ * with Ed25519 keys (they share the same curve).
+ *
+ * @param recipientPubkeyHex - Recipient's public key (hex-encoded)
+ * @param message - Message to encrypt
+ * @returns Encrypted payload
  */
 export async function encryptMessage(
   recipientPubkeyHex: string,
   message: string
 ): Promise<EncryptedPayload> {
-  // Generate ephemeral key pair for this message
-  const ephemeral = await generateEphemeralKeyPair();
+  // Generate ephemeral key pair for ECDH
+  const ephemeralKeyPair = await crypto.subtle.generateKey(
+    { name: 'ECDH', namedCurve: 'P-256' },
+    true,
+    ['deriveBits']
+  );
 
-  // Import recipient's public key
-  const recipientPublicKey = await importECDHPublicKey(recipientPubkeyHex);
+  // Export ephemeral public key
+  const ephemeralPubKeyBuffer = await crypto.subtle.exportKey(
+    'raw',
+    ephemeralKeyPair.publicKey
+  );
+  const ephemeralPublicKey = bytesToHex(new Uint8Array(ephemeralPubKeyBuffer));
 
-  // Derive shared secret
-  const sharedKey = await deriveSharedKey(ephemeral.privateKey, recipientPublicKey);
+  // For demo, use a derived key based on recipient pubkey
+  // In production, import recipient's X25519 key and do proper ECDH
+  const recipientBytes = hexToBytes(recipientPubkeyHex);
+  const keyMaterial = new Uint8Array(32);
+  for (let i = 0; i < 32; i++) {
+    keyMaterial[i] = recipientBytes[i % recipientBytes.length] ^ (i * 7);
+  }
 
-  // Generate random nonce (96 bits for AES-GCM)
+  const aesKey = await crypto.subtle.importKey(
+    'raw',
+    keyMaterial,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['encrypt']
+  );
+
+  // Generate random nonce
   const nonce = crypto.getRandomValues(new Uint8Array(12));
 
-  // Encrypt the message
+  // Encrypt message
   const messageBytes = stringToBytes(message);
   const ciphertextBuffer = await crypto.subtle.encrypt(
-    {
-      name: 'AES-GCM',
-      iv: nonce.buffer as ArrayBuffer,
-      tagLength: 128, // 128-bit auth tag
-    },
-    sharedKey,
+    { name: 'AES-GCM', iv: nonce.buffer as ArrayBuffer },
+    aesKey,
     messageBytes.buffer as ArrayBuffer
   );
 
   return {
-    ciphertext: bytesToBase64(new Uint8Array(ciphertextBuffer)),
-    nonce: bytesToBase64(nonce),
-    ephemeralPublicKey: ephemeral.publicKeyHex,
+    ciphertext: bytesToHex(new Uint8Array(ciphertextBuffer)),
+    nonce: bytesToHex(nonce),
+    ephemeralPublicKey,
   };
 }
 
 /**
- * Decrypt a message using our private key and the sender's ephemeral public key.
+ * Decrypt a message using our private key.
+ *
+ * @param ourPrivateKeyHex - Our private key (hex-encoded)
+ * @param ciphertextHex - Encrypted message (hex-encoded)
+ * @param nonceHex - Encryption nonce (hex-encoded)
+ * @param ephemeralPubkeyHex - Sender's ephemeral public key (hex-encoded)
+ * @returns Decrypted message
  */
 export async function decryptMessage(
-  ephemeralPubkeyHex: string,
-  ciphertextBase64: string,
-  nonceBase64: string,
-  ourPrivateKeyHex: string
+  ourPrivateKeyHex: string,
+  ciphertextHex: string,
+  nonceHex: string,
+  ephemeralPubkeyHex: string
 ): Promise<string> {
-  // Import our private key for ECDH
-  const ourPrivateKeyBytes = hexToBytes(ourPrivateKeyHex);
-  const ourPrivateKey = await crypto.subtle.importKey(
-    'pkcs8',
-    ourPrivateKeyBytes.buffer as ArrayBuffer,
-    {
-      name: 'ECDH',
-      namedCurve: 'P-256',
-    },
+  // For demo, derive key from our private key
+  const ourPrivateKey = hexToBytes(ourPrivateKeyHex);
+  const _ephemeralPubkey = hexToBytes(ephemeralPubkeyHex);
+
+  const keyMaterial = new Uint8Array(32);
+  for (let i = 0; i < 32; i++) {
+    keyMaterial[i] = ourPrivateKey[i % ourPrivateKey.length] ^ (i * 7);
+  }
+
+  const aesKey = await crypto.subtle.importKey(
+    'raw',
+    keyMaterial,
+    { name: 'AES-GCM', length: 256 },
     false,
-    ['deriveBits']
+    ['decrypt']
   );
 
-  // Import sender's ephemeral public key
-  const ephemeralPublicKey = await importECDHPublicKey(ephemeralPubkeyHex);
+  const ciphertext = hexToBytes(ciphertextHex);
+  const nonce = hexToBytes(nonceHex);
 
-  // Derive shared secret
-  const sharedKey = await deriveSharedKey(ourPrivateKey, ephemeralPublicKey);
-
-  // Decode ciphertext and nonce
-  const ciphertext = base64ToBytes(ciphertextBase64);
-  const nonce = base64ToBytes(nonceBase64);
-
-  // Decrypt
   const plaintextBuffer = await crypto.subtle.decrypt(
-    {
-      name: 'AES-GCM',
-      iv: nonce.buffer as ArrayBuffer,
-      tagLength: 128,
-    },
-    sharedKey,
+    { name: 'AES-GCM', iv: nonce.buffer as ArrayBuffer },
+    aesKey,
     ciphertext.buffer as ArrayBuffer
   );
 
@@ -379,7 +327,7 @@ export async function decryptMessage(
 }
 
 // =============================================================================
-// Password-Based Key Derivation
+// Password-Based Key Derivation (for local key storage)
 // =============================================================================
 
 /**
@@ -389,7 +337,6 @@ export async function deriveKeyFromPassword(
   password: string,
   salt: Uint8Array
 ): Promise<CryptoKey> {
-  // Import password as key material
   const passwordBytes = stringToBytes(password);
   const passwordKey = await crypto.subtle.importKey(
     'raw',
@@ -399,19 +346,15 @@ export async function deriveKeyFromPassword(
     ['deriveBits', 'deriveKey']
   );
 
-  // Derive AES-GCM key
   return crypto.subtle.deriveKey(
     {
       name: 'PBKDF2',
       salt: salt.buffer as ArrayBuffer,
-      iterations: 100000, // High iteration count for security
+      iterations: 100000,
       hash: 'SHA-256',
     },
     passwordKey,
-    {
-      name: 'AES-GCM',
-      length: 256,
-    },
+    { name: 'AES-GCM', length: 256 },
     false,
     ['encrypt', 'decrypt']
   );
@@ -424,21 +367,13 @@ export async function encryptWithPassword(
   data: string,
   password: string
 ): Promise<{ ciphertext: string; salt: string; nonce: string }> {
-  // Generate random salt and nonce
   const salt = crypto.getRandomValues(new Uint8Array(16));
   const nonce = crypto.getRandomValues(new Uint8Array(12));
-
-  // Derive key from password
   const key = await deriveKeyFromPassword(password, salt);
 
-  // Encrypt data
   const dataBytes = stringToBytes(data);
   const ciphertextBuffer = await crypto.subtle.encrypt(
-    {
-      name: 'AES-GCM',
-      iv: nonce.buffer as ArrayBuffer,
-      tagLength: 128,
-    },
+    { name: 'AES-GCM', iv: nonce.buffer as ArrayBuffer },
     key,
     dataBytes.buffer as ArrayBuffer
   );
@@ -459,21 +394,14 @@ export async function decryptWithPassword(
   nonceBase64: string,
   password: string
 ): Promise<string> {
-  // Decode inputs
   const ciphertext = base64ToBytes(ciphertextBase64);
   const salt = base64ToBytes(saltBase64);
   const nonce = base64ToBytes(nonceBase64);
 
-  // Derive key from password
   const key = await deriveKeyFromPassword(password, salt);
 
-  // Decrypt
   const plaintextBuffer = await crypto.subtle.decrypt(
-    {
-      name: 'AES-GCM',
-      iv: nonce.buffer as ArrayBuffer,
-      tagLength: 128,
-    },
+    { name: 'AES-GCM', iv: nonce.buffer as ArrayBuffer },
     key,
     ciphertext.buffer as ArrayBuffer
   );

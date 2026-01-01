@@ -8,8 +8,11 @@
 import {
   encryptWithPassword,
   decryptWithPassword,
-  type KeyPair,
+  type Ed25519KeyPair,
 } from './index';
+
+/** Key pair alias for compatibility */
+type KeyPair = Ed25519KeyPair;
 
 // =============================================================================
 // Types

@@ -1,78 +1,58 @@
 /**
  * useFrostSession Hook
  *
- * Manages an active FROST signing session:
- * - Session creation and joining
- * - Message polling
- * - Participant status updates
- * - Error handling and reconnection
+ * Manages an active FROST signing session using the frostd spec:
+ * https://frost.zfnd.org/zcash/server.html
+ *
+ * Key concepts:
+ * - Sessions are created with a fixed set of participant pubkeys
+ * - Communication happens via /send and /receive (polling)
+ * - Messages must be end-to-end encrypted by the client
  */
+
+'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useFrostStore } from '@/lib/store';
-import { FrostClient, WsClient } from '@/lib/frost-client';
-import type {
-  SessionId,
-  SessionInfo,
-  SessionRole,
-  ParticipantInfo,
-  EncryptedMessage,
-  SigningCommitment,
-  FrostSignatureShare,
-  MessageType,
-} from '@/types';
-import { decryptMessage, encryptMessage } from '@/lib/crypto';
+import { FrostClient, MockFrostClient } from '@/lib/frost-client';
+import type { SessionId, PublicKey, ReceivedMessage, GetSessionInfoResponse } from '@/types/api';
+import { encryptMessage, decryptMessage, bytesToHex } from '@/lib/crypto';
 
 // =============================================================================
 // Types
 // =============================================================================
 
 export interface UseFrostSessionOptions {
-  /** Enable WebSocket for real-time updates (default: true) */
-  useWebSocket?: boolean;
-  /** Polling interval in ms when WebSocket unavailable (default: 2000) */
+  /** Polling interval in ms (default: 2000) */
   pollInterval?: number;
-  /** Message long-poll timeout in seconds (default: 30) */
-  longPollTimeout?: number;
 }
 
 export interface UseFrostSessionResult {
   // Session state
-  session: SessionInfo | null;
-  role: SessionRole | null;
-  participants: ParticipantInfo[];
-  inviteCode: string | null;
+  sessionId: SessionId | null;
+  sessionInfo: GetSessionInfoResponse | null;
+  isCoordinator: boolean;
   isLoading: boolean;
   error: string | null;
 
-  // Collected data
-  commitments: SigningCommitment[];
-  signatureShares: FrostSignatureShare[];
+  // Received messages
+  messages: ReceivedMessage[];
 
   // Actions
-  createSession: (
-    name: string,
-    threshold: number,
-    maxParticipants: number
-  ) => Promise<{ sessionId: string; inviteCode: string } | null>;
-  joinSession: (sessionId: SessionId, inviteCode: string) => Promise<boolean>;
-  leaveSession: () => Promise<void>;
+  createSession: (pubkeys: PublicKey[], messageCount: number) => Promise<SessionId | null>;
+  getSessionInfo: (sessionId: SessionId) => Promise<GetSessionInfoResponse | null>;
   closeSession: () => Promise<void>;
 
-  // Signing actions
-  startSigning: (message: string, signerIds: number[]) => Promise<boolean>;
-  submitCommitment: (commitment: SigningCommitment) => Promise<boolean>;
-  submitSignatureShare: (share: FrostSignatureShare) => Promise<boolean>;
-
   // Messaging
-  sendEncryptedMessage: (
-    recipient: string,
-    messageType: MessageType,
-    payload: unknown
-  ) => Promise<boolean>;
+  sendMessage: (recipients: PublicKey[], message: string) => Promise<boolean>;
+  sendToCoordinator: (message: string) => Promise<boolean>;
 
-  // Refresh
-  refreshSession: () => Promise<void>;
+  // Polling control
+  startPolling: (sessionId: SessionId, asCoordinator: boolean) => void;
+  stopPolling: () => void;
+
+  // Clear
+  clearSession: () => void;
 }
 
 // =============================================================================
@@ -82,203 +62,48 @@ export interface UseFrostSessionResult {
 export function useFrostSession(
   options: UseFrostSessionOptions = {}
 ): UseFrostSessionResult {
-  const {
-    useWebSocket = true,
-    pollInterval = 2000,
-    longPollTimeout = 30,
-  } = options;
+  const { pollInterval = 2000 } = options;
 
   // Store state
-  const {
-    frostdUrl,
-    accessToken,
-    pubkey,
-    sessionId: storedSessionId,
-    session: storedSession,
-    role: storedRole,
-    participants: storedParticipants,
-    inviteCode: storedInviteCode,
-    setActiveSession,
-    updateSession,
-    updateParticipants,
-    clearActiveSession,
-    addError,
-  } = useFrostStore();
+  const frostdUrl = useFrostStore((state) => state.frostdUrl);
+  const accessToken = useFrostStore((state) => state.accessToken);
+  const demoMode = useFrostStore((state) => state.demoMode);
 
   // Local state
+  const [sessionId, setSessionId] = useState<SessionId | null>(null);
+  const [sessionInfo, setSessionInfo] = useState<GetSessionInfoResponse | null>(null);
+  const [isCoordinator, setIsCoordinator] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [commitments, setCommitments] = useState<SigningCommitment[]>([]);
-  const [signatureShares, setSignatureShares] = useState<FrostSignatureShare[]>([]);
+  const [messages, setMessages] = useState<ReceivedMessage[]>([]);
 
   // Refs
-  const clientRef = useRef<FrostClient | null>(null);
-  const wsClientRef = useRef<WsClient | null>(null);
-  const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const lastMessageIdRef = useRef<string | null>(null);
-  const privateKeyRef = useRef<string | null>(null);
+  const clientRef = useRef<FrostClient | MockFrostClient | null>(null);
+  const pollingAbortRef = useRef<AbortController | null>(null);
 
-  // Initialize clients
+  // Initialize client
   useEffect(() => {
-    if (!accessToken) {
+    if (demoMode) {
+      clientRef.current = new MockFrostClient({ baseUrl: frostdUrl });
+    } else if (accessToken) {
+      const client = new FrostClient({ baseUrl: frostdUrl });
+      client.setAccessToken(accessToken);
+      clientRef.current = client;
+    } else {
       clientRef.current = null;
-      return;
-    }
-
-    // Create REST client
-    const client = new FrostClient({ baseUrl: frostdUrl });
-    client.setToken(accessToken);
-    clientRef.current = client;
-
-    // Create WebSocket client if enabled
-    if (useWebSocket) {
-      const wsUrl = frostdUrl.replace(/^http/, 'ws') + '/ws';
-      const wsClient = new WsClient({
-        url: wsUrl,
-        token: accessToken,
-      });
-      wsClientRef.current = wsClient;
-
-      // Connect and subscribe to session if active
-      wsClient.connect().then(() => {
-        if (storedSessionId) {
-          wsClient.subscribe(storedSessionId);
-        }
-      }).catch((err) => {
-        console.warn('WebSocket connection failed, falling back to polling:', err);
-      });
     }
 
     return () => {
-      if (wsClientRef.current) {
-        wsClientRef.current.disconnect();
-        wsClientRef.current = null;
+      // Stop polling on unmount
+      if (pollingAbortRef.current) {
+        pollingAbortRef.current.abort();
       }
     };
-  }, [frostdUrl, accessToken, useWebSocket, storedSessionId]);
+  }, [frostdUrl, accessToken, demoMode]);
 
-  // Set up message polling or WebSocket handlers
-  useEffect(() => {
-    if (!storedSessionId || !clientRef.current) {
-      return;
-    }
-
-    // If WebSocket is connected, use event handlers
-    if (wsClientRef.current?.isConnected()) {
-      const unsubscribeSession = wsClientRef.current.onSessionUpdated((event) => {
-        if (event.sessionId === storedSessionId) {
-          updateSession(event.payload.session);
-        }
-      });
-
-      const unsubscribeMessage = wsClientRef.current.on('message_received', (event) => {
-        if (event.sessionId === storedSessionId) {
-          handleReceivedMessage(event.payload as EncryptedMessage);
-        }
-      });
-
-      return () => {
-        unsubscribeSession();
-        unsubscribeMessage();
-      };
-    }
-
-    // Otherwise, fall back to polling
-    const poll = async () => {
-      if (!clientRef.current || !storedSessionId) return;
-
-      try {
-        // Poll for messages
-        const { messages } = await clientRef.current.receiveMessages({
-          sessionId: storedSessionId,
-          afterMessageId: lastMessageIdRef.current ?? undefined,
-          timeout: longPollTimeout,
-        });
-
-        for (const message of messages) {
-          handleReceivedMessage(message);
-          lastMessageIdRef.current = message.id;
-        }
-
-        // Refresh session info periodically
-        const { session } = await clientRef.current.getSessionInfo(storedSessionId);
-        updateSession(session);
-        updateParticipants(session.participants);
-      } catch (err) {
-        console.error('Polling error:', err);
-      }
-    };
-
-    // Start polling
-    poll();
-    pollIntervalRef.current = setInterval(poll, pollInterval);
-
-    return () => {
-      if (pollIntervalRef.current) {
-        clearInterval(pollIntervalRef.current);
-        pollIntervalRef.current = null;
-      }
-    };
-  }, [storedSessionId, pollInterval, longPollTimeout, updateSession, updateParticipants]);
-
-  // Handle received encrypted message
-  const handleReceivedMessage = useCallback(async (message: EncryptedMessage) => {
-    if (!privateKeyRef.current) {
-      console.warn('Cannot decrypt message: no private key available');
-      return;
-    }
-
-    try {
-      // Decrypt the message
-      const decryptedJson = await decryptMessage(
-        message.senderPubkey,
-        message.ciphertext,
-        message.nonce,
-        privateKeyRef.current
-      );
-
-      const payload = JSON.parse(decryptedJson);
-
-      // Handle based on message type
-      switch (message.messageType) {
-        case 'commitment':
-          setCommitments((prev) => {
-            const existing = prev.find(
-              (c) => c.participantId === payload.participantId
-            );
-            if (existing) return prev;
-            return [...prev, payload as SigningCommitment];
-          });
-          break;
-
-        case 'signature_share':
-          setSignatureShares((prev) => {
-            const existing = prev.find(
-              (s) => s.participantId === payload.participantId
-            );
-            if (existing) return prev;
-            return [...prev, payload as FrostSignatureShare];
-          });
-          break;
-
-        case 'ack':
-        case 'error':
-          // Handle acknowledgments and errors
-          console.log('Received:', message.messageType, payload);
-          break;
-      }
-    } catch (err) {
-      console.error('Failed to decrypt message:', err);
-    }
-  }, []);
-
-  // Create session
+  // Create session (coordinator only)
   const createSession = useCallback(
-    async (
-      name: string,
-      threshold: number,
-      maxParticipants: number
-    ): Promise<{ sessionId: string; inviteCode: string } | null> => {
+    async (pubkeys: PublicKey[], messageCount: number): Promise<SessionId | null> => {
       if (!clientRef.current) {
         setError('Not connected');
         return null;
@@ -288,266 +113,188 @@ export function useFrostSession(
       setError(null);
 
       try {
-        const response = await clientRef.current.createSession({
-          name,
-          threshold,
-          maxParticipants,
-        });
+        const response = await clientRef.current.createSession(pubkeys, messageCount);
+        const newSessionId = response.session_id;
 
-        setActiveSession(response.session, 'coordinator', response.inviteCode);
+        setSessionId(newSessionId);
+        setIsCoordinator(true);
 
-        // Subscribe to session via WebSocket
-        if (wsClientRef.current?.isConnected()) {
-          wsClientRef.current.subscribe(response.session.sessionId);
-        }
+        // Fetch session info
+        const info = await clientRef.current.getSessionInfo(newSessionId);
+        setSessionInfo(info);
 
-        return {
-          sessionId: response.session.sessionId,
-          inviteCode: response.inviteCode,
-        };
+        return newSessionId;
       } catch (err) {
         const message = err instanceof Error ? err.message : 'Failed to create session';
         setError(message);
-        addError({ code: 'UNKNOWN_ERROR', message });
         return null;
       } finally {
         setIsLoading(false);
       }
     },
-    [setActiveSession, addError]
+    []
   );
 
-  // Join session
-  const joinSession = useCallback(
-    async (sessionId: SessionId, inviteCode: string): Promise<boolean> => {
+  // Get session info
+  const getSessionInfo = useCallback(
+    async (sid: SessionId): Promise<GetSessionInfoResponse | null> => {
       if (!clientRef.current) {
         setError('Not connected');
-        return false;
+        return null;
       }
 
       setIsLoading(true);
       setError(null);
 
       try {
-        const response = await clientRef.current.joinSession(sessionId, inviteCode);
-
-        setActiveSession(response.session, 'participant');
-
-        // Subscribe to session via WebSocket
-        if (wsClientRef.current?.isConnected()) {
-          wsClientRef.current.subscribe(sessionId);
-        }
-
-        return true;
+        const info = await clientRef.current.getSessionInfo(sid);
+        setSessionId(sid);
+        setSessionInfo(info);
+        return info;
       } catch (err) {
-        const message = err instanceof Error ? err.message : 'Failed to join session';
+        const message = err instanceof Error ? err.message : 'Failed to get session info';
         setError(message);
-        addError({ code: 'SESSION_NOT_FOUND', message });
-        return false;
+        return null;
       } finally {
         setIsLoading(false);
       }
     },
-    [setActiveSession, addError]
+    []
   );
-
-  // Leave session
-  const leaveSession = useCallback(async (): Promise<void> => {
-    if (wsClientRef.current && storedSessionId) {
-      wsClientRef.current.unsubscribe(storedSessionId);
-    }
-
-    // Clear local state
-    setCommitments([]);
-    setSignatureShares([]);
-    lastMessageIdRef.current = null;
-
-    clearActiveSession();
-  }, [storedSessionId, clearActiveSession]);
 
   // Close session (coordinator only)
   const closeSession = useCallback(async (): Promise<void> => {
-    if (!clientRef.current || !storedSessionId) {
+    if (!clientRef.current || !sessionId) {
       return;
+    }
+
+    // Stop polling
+    if (pollingAbortRef.current) {
+      pollingAbortRef.current.abort();
+      pollingAbortRef.current = null;
     }
 
     setIsLoading(true);
 
     try {
-      await clientRef.current.closeSession(storedSessionId);
+      await clientRef.current.closeSession(sessionId);
     } catch (err) {
       console.error('Failed to close session:', err);
     } finally {
-      await leaveSession();
+      setSessionId(null);
+      setSessionInfo(null);
+      setIsCoordinator(false);
+      setMessages([]);
       setIsLoading(false);
     }
-  }, [storedSessionId, leaveSession]);
+  }, [sessionId]);
 
-  // Start signing
-  const startSigning = useCallback(
-    async (message: string, signerIds: number[]): Promise<boolean> => {
-      if (!clientRef.current || !storedSessionId) {
+  // Send message to specific recipients
+  const sendMessage = useCallback(
+    async (recipients: PublicKey[], message: string): Promise<boolean> => {
+      if (!clientRef.current || !sessionId) {
         setError('No active session');
         return false;
       }
 
-      setIsLoading(true);
-      setError(null);
-
       try {
-        await clientRef.current.startSigning({
-          sessionId: storedSessionId,
-          message,
-          signerIds,
-        });
+        // Encrypt the message for each recipient
+        // In a real implementation, you'd encrypt per-recipient
+        // For simplicity, we're sending the same encrypted blob
+        const encrypted = await encryptMessage(recipients[0] || '', message);
+        const msgHex = bytesToHex(new TextEncoder().encode(JSON.stringify(encrypted)));
 
-        // Clear previous round data
-        setCommitments([]);
-        setSignatureShares([]);
-
+        await clientRef.current.send(sessionId, recipients, msgHex);
         return true;
       } catch (err) {
-        const message = err instanceof Error ? err.message : 'Failed to start signing';
-        setError(message);
+        const errorMsg = err instanceof Error ? err.message : 'Failed to send message';
+        setError(errorMsg);
         return false;
-      } finally {
-        setIsLoading(false);
       }
     },
-    [storedSessionId]
+    [sessionId]
   );
 
-  // Submit commitment
-  const submitCommitment = useCallback(
-    async (commitment: SigningCommitment): Promise<boolean> => {
-      if (!clientRef.current || !storedSessionId) {
-        setError('No active session');
-        return false;
+  // Send message to coordinator (empty recipients array per spec)
+  const sendToCoordinator = useCallback(
+    async (message: string): Promise<boolean> => {
+      return sendMessage([], message);
+    },
+    [sendMessage]
+  );
+
+  // Start polling for messages
+  const startPolling = useCallback(
+    (sid: SessionId, asCoordinator: boolean) => {
+      // Stop any existing polling
+      if (pollingAbortRef.current) {
+        pollingAbortRef.current.abort();
       }
 
-      try {
-        const response = await clientRef.current.submitCommitment(
-          storedSessionId,
-          commitment
-        );
+      const abortController = new AbortController();
+      pollingAbortRef.current = abortController;
 
-        if (response.accepted) {
-          setCommitments((prev) => [...prev, commitment]);
+      const poll = async () => {
+        if (!clientRef.current || abortController.signal.aborted) {
+          return;
         }
 
-        return response.accepted;
-      } catch (err) {
-        const message = err instanceof Error ? err.message : 'Failed to submit commitment';
-        setError(message);
-        return false;
-      }
-    },
-    [storedSessionId]
-  );
+        try {
+          const receivedMessages = await clientRef.current.receive(sid, asCoordinator);
 
-  // Submit signature share
-  const submitSignatureShare = useCallback(
-    async (share: FrostSignatureShare): Promise<boolean> => {
-      if (!clientRef.current || !storedSessionId) {
-        setError('No active session');
-        return false;
-      }
-
-      try {
-        const response = await clientRef.current.submitSignatureShare(
-          storedSessionId,
-          share
-        );
-
-        if (response.accepted) {
-          setSignatureShares((prev) => [...prev, share]);
+          if (receivedMessages.length > 0) {
+            setMessages((prev) => [...prev, ...receivedMessages]);
+          }
+        } catch (err) {
+          if (!abortController.signal.aborted) {
+            console.error('Polling error:', err);
+          }
         }
 
-        return response.accepted;
-      } catch (err) {
-        const message = err instanceof Error ? err.message : 'Failed to submit signature share';
-        setError(message);
-        return false;
-      }
+        // Schedule next poll if not aborted
+        if (!abortController.signal.aborted) {
+          setTimeout(poll, pollInterval);
+        }
+      };
+
+      // Start polling
+      poll();
     },
-    [storedSessionId]
+    [pollInterval]
   );
 
-  // Send encrypted message
-  const sendEncryptedMessage = useCallback(
-    async (
-      recipient: string,
-      messageType: MessageType,
-      payload: unknown
-    ): Promise<boolean> => {
-      if (!clientRef.current || !storedSessionId) {
-        setError('No active session');
-        return false;
-      }
-
-      try {
-        // Encrypt the message
-        const encrypted = await encryptMessage(recipient, JSON.stringify(payload));
-
-        await clientRef.current.sendMessage({
-          sessionId: storedSessionId,
-          recipient,
-          messageType,
-          ciphertext: encrypted.ciphertext,
-          nonce: encrypted.nonce,
-        });
-
-        return true;
-      } catch (err) {
-        const message = err instanceof Error ? err.message : 'Failed to send message';
-        setError(message);
-        return false;
-      }
-    },
-    [storedSessionId]
-  );
-
-  // Refresh session info
-  const refreshSession = useCallback(async (): Promise<void> => {
-    if (!clientRef.current || !storedSessionId) {
-      return;
+  // Stop polling
+  const stopPolling = useCallback(() => {
+    if (pollingAbortRef.current) {
+      pollingAbortRef.current.abort();
+      pollingAbortRef.current = null;
     }
+  }, []);
 
-    try {
-      const { session, commitments: fetchedCommitments, signatureShares: fetchedShares } =
-        await clientRef.current.getSessionInfo(storedSessionId);
-
-      updateSession(session);
-      updateParticipants(session.participants);
-
-      if (fetchedCommitments) {
-        setCommitments(fetchedCommitments);
-      }
-      if (fetchedShares) {
-        setSignatureShares(fetchedShares);
-      }
-    } catch (err) {
-      console.error('Failed to refresh session:', err);
-    }
-  }, [storedSessionId, updateSession, updateParticipants]);
+  // Clear session state
+  const clearSession = useCallback(() => {
+    stopPolling();
+    setSessionId(null);
+    setSessionInfo(null);
+    setIsCoordinator(false);
+    setMessages([]);
+    setError(null);
+  }, [stopPolling]);
 
   return {
-    session: storedSession,
-    role: storedRole,
-    participants: storedParticipants,
-    inviteCode: storedInviteCode,
+    sessionId,
+    sessionInfo,
+    isCoordinator,
     isLoading,
     error,
-    commitments,
-    signatureShares,
+    messages,
     createSession,
-    joinSession,
-    leaveSession,
+    getSessionInfo,
     closeSession,
-    startSigning,
-    submitCommitment,
-    submitSignatureShare,
-    sendEncryptedMessage,
-    refreshSession,
+    sendMessage,
+    sendToCoordinator,
+    startPolling,
+    stopPolling,
+    clearSession,
   };
 }

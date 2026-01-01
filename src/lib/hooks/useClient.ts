@@ -32,7 +32,7 @@ export function useClient(): UnifiedClient | null {
       // Create real client
       const realClient = new FrostClient({ baseUrl: frostdUrl });
       if (accessToken) {
-        realClient.setToken(accessToken, tokenExpiresAt ?? undefined);
+        realClient.setAccessToken(accessToken, tokenExpiresAt ?? undefined);
       }
       clientRef.current = realClient;
     }

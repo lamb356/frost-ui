@@ -1,17 +1,28 @@
 /**
  * FROST Client Error Classes
+ *
+ * Error types for the frostd client.
  */
 
-import type { FrostError, FrostErrorCode } from '@/types';
+/** Client-side error codes */
+export type ClientErrorCode =
+  | 'NETWORK_ERROR'
+  | 'PARSE_ERROR'
+  | 'NOT_AUTHORIZED'
+  | 'INVALID_ARGUMENT'
+  | 'SESSION_NOT_FOUND'
+  | 'NOT_COORDINATOR'
+  | 'ENCRYPTION_ERROR'
+  | 'UNKNOWN_ERROR';
 
 /**
  * Base error class for FROST client errors.
  */
 export class FrostClientError extends Error {
-  readonly code: FrostErrorCode;
+  readonly code: ClientErrorCode;
   readonly details?: Record<string, unknown>;
 
-  constructor(code: FrostErrorCode, message: string, details?: Record<string, unknown>) {
+  constructor(code: ClientErrorCode, message: string, details?: Record<string, unknown>) {
     super(message);
     this.name = 'FrostClientError';
     this.code = code;
@@ -21,24 +32,6 @@ export class FrostClientError extends Error {
     if (Error.captureStackTrace) {
       Error.captureStackTrace(this, FrostClientError);
     }
-  }
-
-  /**
-   * Create from a FrostError object.
-   */
-  static fromFrostError(error: FrostError): FrostClientError {
-    return new FrostClientError(error.code, error.message, error.details);
-  }
-
-  /**
-   * Convert to a plain FrostError object.
-   */
-  toFrostError(): FrostError {
-    return {
-      code: this.code,
-      message: this.message,
-      details: this.details,
-    };
   }
 }
 
@@ -71,7 +64,7 @@ export class AuthenticationError extends FrostClientError {
 export class SessionError extends FrostClientError {
   readonly sessionId?: string;
 
-  constructor(code: FrostErrorCode, message: string, sessionId?: string) {
+  constructor(code: ClientErrorCode, message: string, sessionId?: string) {
     super(code, message, sessionId ? { sessionId } : undefined);
     this.name = 'SessionError';
     this.sessionId = sessionId;
@@ -92,7 +85,7 @@ export class EncryptionError extends FrostClientError {
  * FROST protocol errors (invalid commitments, shares, etc.)
  */
 export class ProtocolError extends FrostClientError {
-  constructor(code: FrostErrorCode, message: string, details?: Record<string, unknown>) {
+  constructor(code: ClientErrorCode, message: string, details?: Record<string, unknown>) {
     super(code, message, details);
     this.name = 'ProtocolError';
   }

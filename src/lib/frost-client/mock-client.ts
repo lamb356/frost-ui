@@ -2,7 +2,8 @@
  * Mock FROST Client
  *
  * Simulates the frostd server for demo/testing purposes.
- * Implements the same interface as FrostClient with realistic delays and mock data.
+ * Implements the same interface as FrostClient matching the official spec:
+ * https://frost.zfnd.org/zcash/server.html
  */
 
 import type {
@@ -10,46 +11,24 @@ import type {
   RequestOptions,
   PublicKey,
   SessionId,
-  SessionInfo,
-  SessionState,
-  ParticipantInfo,
-  MessageType,
-  EncryptedMessage,
-  SigningCommitment,
-  FrostSignatureShare,
-  AggregateSignature,
   ChallengeResponse,
   LoginResponse,
   CreateSessionResponse,
   ListSessionsResponse,
   GetSessionInfoResponse,
-  JoinSessionResponse,
-  CloseSessionResponse,
-  SendMessageResponse,
-  ReceiveMessagesResponse,
-  StartSigningResponse,
-  SubmitCommitmentResponse,
-  GetCommitmentsResponse,
-  SubmitSignatureShareResponse,
-  AggregateSignatureResponse,
-} from '@/types';
+  ReceivedMessage,
+} from '@/types/api';
 import type { FrostClientEvent, FrostClientEventHandler } from './client';
 
 // =============================================================================
 // Configuration
 // =============================================================================
 
-/** Probability of simulated random failure (10%) */
-const FAILURE_PROBABILITY = 0.1;
-
 /** Minimum simulated delay in ms */
-const MIN_DELAY = 500;
+const MIN_DELAY = 200;
 
 /** Maximum simulated delay in ms */
-const MAX_DELAY = 2000;
-
-/** Number of simulated participants that will join */
-const SIMULATED_PARTICIPANTS = 3;
+const MAX_DELAY = 800;
 
 // =============================================================================
 // Helpers
@@ -64,9 +43,13 @@ function randomHex(length: number): string {
     .join('');
 }
 
-/** Generate a random session ID */
-function generateSessionId(): SessionId {
-  return `session-${randomHex(8)}`;
+/** Generate a UUID v4 */
+function generateUUID(): string {
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === 'x' ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
 }
 
 /** Simulate network delay */
@@ -75,20 +58,10 @@ async function simulateDelay(min = MIN_DELAY, max = MAX_DELAY): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, delay));
 }
 
-/** Maybe throw a random error (for testing error handling) */
-function maybeThrowError(context: string): void {
-  if (Math.random() < FAILURE_PROBABILITY) {
-    throw new Error(`Simulated ${context} failure - this is expected in demo mode`);
-  }
-}
-
-/** Generate a mock public key */
+/** Generate a mock Ed25519 public key (32 bytes) */
 function mockPubkey(): PublicKey {
-  return randomHex(33); // 33 bytes for compressed public key
+  return randomHex(32);
 }
-
-/** Generate mock participant names */
-const PARTICIPANT_NAMES = ['Alice', 'Bob', 'Charlie', 'Diana', 'Eve'];
 
 // =============================================================================
 // Mock Client Implementation
@@ -97,13 +70,12 @@ const PARTICIPANT_NAMES = ['Alice', 'Bob', 'Charlie', 'Diana', 'Eve'];
 export class MockFrostClient {
   private eventHandlers: Set<FrostClientEventHandler> = new Set();
   private tokenExpiresAt: number | null = null;
-  private token: string | null = null;
+  private accessToken: string | null = null;
   private currentPubkey: PublicKey | null = null;
 
   // Mock state
   private sessions: Map<SessionId, MockSession> = new Map();
-  private currentSession: MockSession | null = null;
-  private signingSimulationTimer: ReturnType<typeof setTimeout> | null = null;
+  private messageQueues: Map<string, ReceivedMessage[]> = new Map();
 
   constructor(_config: FrostdConfig) {
     // Config not used in mock client
@@ -133,549 +105,275 @@ export class MockFrostClient {
   // ===========================================================================
 
   isAuthenticated(): boolean {
-    if (!this.token) return false;
-    if (this.tokenExpiresAt && Date.now() / 1000 > this.tokenExpiresAt) {
+    if (!this.accessToken) return false;
+    if (this.tokenExpiresAt && Date.now() > this.tokenExpiresAt) {
       this.logout();
       return false;
     }
     return true;
   }
 
-  async getChallenge(
-    pubkey: PublicKey,
-    _options?: RequestOptions
-  ): Promise<ChallengeResponse> {
-    await simulateDelay(300, 800);
-
-    this.currentPubkey = pubkey;
+  /**
+   * GET /challenge - returns UUID challenge
+   */
+  async getChallenge(_options?: RequestOptions): Promise<ChallengeResponse> {
+    await simulateDelay(100, 300);
 
     return {
-      challenge: randomHex(32),
-      expiresAt: Math.floor(Date.now() / 1000) + 300, // 5 minutes
+      challenge: generateUUID(),
     };
   }
 
+  /**
+   * POST /login - authenticate with signed challenge
+   */
   async login(
+    challenge: string,
     pubkey: PublicKey,
-    _challenge: string,
     _signature: string,
     _options?: RequestOptions
   ): Promise<LoginResponse> {
-    await simulateDelay(500, 1000);
+    await simulateDelay(200, 500);
 
+    // In mock mode, accept any signature
     this.currentPubkey = pubkey;
-    this.token = `mock-token-${randomHex(16)}`;
-    this.tokenExpiresAt = Math.floor(Date.now() / 1000) + 3600; // 1 hour
+    this.accessToken = `mock-token-${randomHex(16)}`;
+    this.tokenExpiresAt = Date.now() + 60 * 60 * 1000; // 1 hour
 
-    this.emit({ type: 'authenticated', token: this.token });
+    console.log(`[Demo] Authenticated with pubkey: ${pubkey.slice(0, 16)}...`);
+    console.log(`[Demo] Challenge was: ${challenge}`);
+
+    this.emit({ type: 'authenticated', accessToken: this.accessToken });
 
     return {
-      token: this.token,
-      expiresAt: this.tokenExpiresAt,
+      access_token: this.accessToken,
     };
   }
 
-  logout(): void {
-    this.token = null;
+  /**
+   * POST /logout - invalidate access token
+   */
+  async logout(_options?: RequestOptions): Promise<void> {
+    await simulateDelay(50, 150);
+    this.accessToken = null;
     this.tokenExpiresAt = null;
     this.emit({ type: 'logged_out' });
   }
 
-  setToken(token: string, expiresAt?: number): void {
-    this.token = token;
-    this.tokenExpiresAt = expiresAt ?? null;
+  setAccessToken(token: string, expiresAt?: number): void {
+    this.accessToken = token;
+    this.tokenExpiresAt = expiresAt ?? Date.now() + 60 * 60 * 1000;
   }
 
   // ===========================================================================
   // Session Management (Mock)
   // ===========================================================================
 
+  /**
+   * POST /create_new_session
+   */
   async createSession(
-    params: {
-      name: string;
-      threshold: number;
-      maxParticipants: number;
-      durationSeconds?: number;
-      description?: string;
-    },
+    pubkeys: PublicKey[],
+    messageCount: number,
     _options?: RequestOptions
   ): Promise<CreateSessionResponse> {
     await simulateDelay();
-    maybeThrowError('session creation');
 
-    const sessionId = generateSessionId();
-    const now = Math.floor(Date.now() / 1000);
+    const sessionId = generateUUID();
 
-    const session: SessionInfo = {
-      sessionId,
-      name: params.name,
-      coordinatorPubkey: this.currentPubkey || mockPubkey(),
-      state: 'created',
-      threshold: params.threshold,
-      maxParticipants: params.maxParticipants,
-      participants: [],
-      createdAt: now,
-      expiresAt: now + (params.durationSeconds || 3600),
+    const session: MockSession = {
+      session_id: sessionId,
+      pubkeys,
+      message_count: messageCount,
+      coordinator_pubkey: this.currentPubkey || mockPubkey(),
     };
 
-    const mockSession: MockSession = {
-      info: session,
-      inviteCode: `DEMO-${randomHex(4).toUpperCase()}`,
-      commitments: [],
-      signatureShares: [],
-      messages: [],
-    };
+    this.sessions.set(sessionId, session);
 
-    this.sessions.set(sessionId, mockSession);
-    this.currentSession = mockSession;
+    console.log(`[Demo] Created session: ${sessionId}`);
+    console.log(`[Demo] Participants: ${pubkeys.length}, Messages: ${messageCount}`);
 
-    this.emit({ type: 'session_created', session });
-
-    // Start simulating participants joining
-    this.simulateParticipantsJoining(mockSession);
+    this.emit({ type: 'session_created', sessionId });
 
     return {
-      session,
-      inviteCode: mockSession.inviteCode,
+      session_id: sessionId,
     };
   }
 
-  async listSessions(
-    _params: {
-      state?: SessionState | SessionState[];
-      participating?: boolean;
-      coordinating?: boolean;
-      limit?: number;
-      offset?: number;
-    } = {},
-    _options?: RequestOptions
-  ): Promise<ListSessionsResponse> {
-    await simulateDelay(300, 600);
+  /**
+   * POST /list_sessions
+   */
+  async listSessions(_options?: RequestOptions): Promise<ListSessionsResponse> {
+    await simulateDelay(100, 300);
 
-    const sessions = Array.from(this.sessions.values()).map((s) => s.info);
+    const sessionIds = Array.from(this.sessions.keys());
 
     return {
-      sessions,
-      total: sessions.length,
+      session_ids: sessionIds,
     };
   }
 
+  /**
+   * POST /get_session_info
+   */
   async getSessionInfo(
     sessionId: SessionId,
     _options?: RequestOptions
   ): Promise<GetSessionInfoResponse> {
-    await simulateDelay(200, 500);
+    await simulateDelay(100, 300);
 
-    const mockSession = this.sessions.get(sessionId);
-    if (!mockSession) {
+    const session = this.sessions.get(sessionId);
+    if (!session) {
       throw new Error('Session not found');
     }
 
     return {
-      session: mockSession.info,
-      role: 'coordinator',
-      commitments: mockSession.commitments,
-      signatureShares: mockSession.signatureShares,
-      aggregateSignature: mockSession.aggregateSignature,
+      message_count: session.message_count,
+      pubkeys: session.pubkeys,
+      coordinator_pubkey: session.coordinator_pubkey,
     };
   }
 
-  async joinSession(
-    sessionId: SessionId,
-    inviteCode: string,
-    _options?: RequestOptions
-  ): Promise<JoinSessionResponse> {
-    await simulateDelay();
-    maybeThrowError('join session');
+  /**
+   * POST /close_session
+   */
+  async closeSession(sessionId: SessionId, _options?: RequestOptions): Promise<void> {
+    await simulateDelay(100, 300);
 
-    const mockSession = this.sessions.get(sessionId);
-    if (!mockSession) {
+    const session = this.sessions.get(sessionId);
+    if (!session) {
       throw new Error('Session not found');
     }
 
-    if (mockSession.inviteCode !== inviteCode) {
-      throw new Error('Invalid invite code');
-    }
-
-    const participantId = mockSession.info.participants.length + 1;
-
-    const participant: ParticipantInfo = {
-      pubkey: this.currentPubkey || mockPubkey(),
-      participantId,
-      hasCommitment: false,
-      hasSignatureShare: false,
-      joinedAt: Math.floor(Date.now() / 1000),
-    };
-
-    mockSession.info.participants.push(participant);
-
-    this.emit({
-      type: 'session_joined',
-      session: mockSession.info,
-      participantId,
-    });
-
-    return {
-      session: mockSession.info,
-      participantId,
-    };
-  }
-
-  async closeSession(
-    sessionId: SessionId,
-    _reason?: string,
-    _options?: RequestOptions
-  ): Promise<CloseSessionResponse> {
-    await simulateDelay(300, 600);
-
-    const mockSession = this.sessions.get(sessionId);
-    if (!mockSession) {
-      throw new Error('Session not found');
-    }
-
-    mockSession.info.state = 'closed';
-
-    return {
-      success: true,
-      session: mockSession.info,
-    };
+    this.sessions.delete(sessionId);
+    console.log(`[Demo] Closed session: ${sessionId}`);
   }
 
   // ===========================================================================
   // Messaging (Mock)
   // ===========================================================================
 
-  async sendMessage(
-    params: {
-      sessionId: SessionId;
-      recipient: PublicKey | 'broadcast';
-      messageType: MessageType;
-      ciphertext: string;
-      nonce: string;
-    },
+  /**
+   * POST /send - send encrypted message
+   */
+  async send(
+    sessionId: SessionId,
+    recipients: PublicKey[],
+    msg: string,
     _options?: RequestOptions
-  ): Promise<SendMessageResponse> {
-    await simulateDelay(200, 400);
+  ): Promise<void> {
+    await simulateDelay(100, 300);
 
-    const mockSession = this.sessions.get(params.sessionId);
-    if (!mockSession) {
+    const session = this.sessions.get(sessionId);
+    if (!session) {
       throw new Error('Session not found');
     }
 
-    const messageId = `msg-${randomHex(8)}`;
-    const timestamp = Math.floor(Date.now() / 1000);
+    // Store message for each recipient
+    const senderPubkey = this.currentPubkey || mockPubkey();
+    const targetRecipients = recipients.length > 0 ? recipients : [session.coordinator_pubkey];
 
-    const message: EncryptedMessage = {
-      id: messageId,
-      senderPubkey: this.currentPubkey || mockPubkey(),
-      recipientPubkey: params.recipient,
-      messageType: params.messageType,
-      ciphertext: params.ciphertext,
-      nonce: params.nonce,
-      timestamp,
-    };
+    for (const recipient of targetRecipients) {
+      const queueKey = `${sessionId}:${recipient}`;
+      const queue = this.messageQueues.get(queueKey) || [];
+      queue.push({
+        sender: senderPubkey,
+        msg,
+      });
+      this.messageQueues.set(queueKey, queue);
+    }
 
-    mockSession.messages.push(message);
-
-    return {
-      messageId,
-      timestamp,
-    };
+    console.log(`[Demo] Sent message to ${targetRecipients.length} recipient(s)`);
   }
 
-  async receiveMessages(
-    params: {
-      sessionId: SessionId;
-      afterMessageId?: string;
-      messageTypes?: MessageType[];
-      limit?: number;
-      timeout?: number;
-    },
+  /**
+   * POST /receive - receive encrypted messages
+   */
+  async receive(
+    sessionId: SessionId,
+    asCoordinator: boolean,
     _options?: RequestOptions
-  ): Promise<ReceiveMessagesResponse> {
-    // Simulate long-poll delay
-    const delay = params.timeout ? Math.min(params.timeout * 1000, MAX_DELAY) : 500;
-    await simulateDelay(delay / 2, delay);
+  ): Promise<ReceivedMessage[]> {
+    await simulateDelay(100, 300);
 
-    const mockSession = this.sessions.get(params.sessionId);
-    if (!mockSession) {
+    const session = this.sessions.get(sessionId);
+    if (!session) {
       throw new Error('Session not found');
     }
 
-    // Return empty for now - messages are simulated differently
-    return {
-      messages: [],
-      hasMore: false,
-    };
+    // Get messages for this user
+    const myPubkey = asCoordinator ? session.coordinator_pubkey : (this.currentPubkey || mockPubkey());
+    const queueKey = `${sessionId}:${myPubkey}`;
+    const messages = this.messageQueues.get(queueKey) || [];
+
+    // Clear the queue after reading
+    this.messageQueues.set(queueKey, []);
+
+    if (messages.length > 0) {
+      console.log(`[Demo] Received ${messages.length} message(s)`);
+    }
+
+    return messages;
   }
 
   // ===========================================================================
-  // Signing Ceremony (Mock)
+  // Polling Helper
   // ===========================================================================
 
-  async startSigning(
-    params: {
-      sessionId: SessionId;
-      message: string;
-      signerIds: number[];
-    },
-    _options?: RequestOptions
-  ): Promise<StartSigningResponse> {
-    await simulateDelay();
-    maybeThrowError('start signing');
-
-    const mockSession = this.sessions.get(params.sessionId);
-    if (!mockSession) {
-      throw new Error('Session not found');
-    }
-
-    mockSession.info.message = params.message;
-    mockSession.info.state = 'collecting_commitments';
-
-    // Simulate participants submitting commitments
-    this.simulateCommitments(mockSession, params.signerIds);
-
-    return {
-      session: mockSession.info,
-    };
-  }
-
-  async submitCommitment(
+  async pollMessages(
     sessionId: SessionId,
-    commitment: SigningCommitment,
-    _options?: RequestOptions
-  ): Promise<SubmitCommitmentResponse> {
-    await simulateDelay(300, 600);
+    asCoordinator: boolean,
+    intervalMs: number,
+    signal: AbortSignal,
+    onMessages: (messages: ReceivedMessage[]) => void
+  ): Promise<void> {
+    while (!signal.aborted) {
+      try {
+        const messages = await this.receive(sessionId, asCoordinator);
+        if (messages.length > 0) {
+          onMessages(messages);
+        }
+      } catch (error) {
+        if (signal.aborted) break;
+        console.error('[Demo] Polling error:', error);
+      }
 
-    const mockSession = this.sessions.get(sessionId);
-    if (!mockSession) {
-      throw new Error('Session not found');
+      await new Promise((resolve) => {
+        const timeout = setTimeout(resolve, intervalMs);
+        signal.addEventListener('abort', () => clearTimeout(timeout), { once: true });
+      });
     }
-
-    mockSession.commitments.push(commitment);
-
-    // Update participant status
-    const participant = mockSession.info.participants.find(
-      (p) => p.participantId === commitment.participantId
-    );
-    if (participant) {
-      participant.hasCommitment = true;
-    }
-
-    return {
-      accepted: true,
-      session: mockSession.info,
-    };
-  }
-
-  async getCommitments(
-    sessionId: SessionId,
-    _options?: RequestOptions
-  ): Promise<GetCommitmentsResponse> {
-    await simulateDelay(200, 400);
-
-    const mockSession = this.sessions.get(sessionId);
-    if (!mockSession) {
-      throw new Error('Session not found');
-    }
-
-    const signerIds = mockSession.info.participants
-      .filter((p) => p.hasCommitment)
-      .map((p) => p.participantId);
-
-    return {
-      commitments: mockSession.commitments,
-      message: mockSession.info.message || '',
-      signerIds,
-    };
-  }
-
-  async submitSignatureShare(
-    sessionId: SessionId,
-    signatureShare: FrostSignatureShare,
-    _options?: RequestOptions
-  ): Promise<SubmitSignatureShareResponse> {
-    await simulateDelay(300, 600);
-
-    const mockSession = this.sessions.get(sessionId);
-    if (!mockSession) {
-      throw new Error('Session not found');
-    }
-
-    mockSession.signatureShares.push(signatureShare);
-
-    // Update participant status
-    const participant = mockSession.info.participants.find(
-      (p) => p.participantId === signatureShare.participantId
-    );
-    if (participant) {
-      participant.hasSignatureShare = true;
-    }
-
-    // Check if we have enough shares
-    if (mockSession.signatureShares.length >= mockSession.info.threshold) {
-      mockSession.info.state = 'aggregating';
-    }
-
-    return {
-      accepted: true,
-      session: mockSession.info,
-    };
-  }
-
-  async aggregateSignature(
-    sessionId: SessionId,
-    _options?: RequestOptions
-  ): Promise<AggregateSignatureResponse> {
-    await simulateDelay(1000, 2000);
-    maybeThrowError('signature aggregation');
-
-    const mockSession = this.sessions.get(sessionId);
-    if (!mockSession) {
-      throw new Error('Session not found');
-    }
-
-    // Generate mock aggregate signature
-    const signature: AggregateSignature = randomHex(64);
-    mockSession.aggregateSignature = signature;
-    mockSession.info.state = 'completed';
-
-    return {
-      signature,
-      valid: true,
-      session: mockSession.info,
-    };
   }
 
   // ===========================================================================
-  // Simulation Helpers
+  // Demo Helpers
   // ===========================================================================
 
   /**
-   * Simulate participants joining the session.
+   * Simulate receiving a message (for demo purposes).
+   * Call this to inject a message as if from another participant.
    */
-  private simulateParticipantsJoining(mockSession: MockSession): void {
-    const addParticipant = (index: number) => {
-      if (index >= SIMULATED_PARTICIPANTS) return;
-      if (mockSession.info.state !== 'created') return;
+  injectMessage(sessionId: SessionId, sender: PublicKey, msg: string): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
 
-      const delay = 1000 + Math.random() * 2000;
-      setTimeout(() => {
-        const participant: ParticipantInfo = {
-          pubkey: mockPubkey(),
-          participantId: index + 1,
-          hasCommitment: false,
-          hasSignatureShare: false,
-          joinedAt: Math.floor(Date.now() / 1000),
-        };
+    // Inject for coordinator
+    const queueKey = `${sessionId}:${session.coordinator_pubkey}`;
+    const queue = this.messageQueues.get(queueKey) || [];
+    queue.push({ sender, msg });
+    this.messageQueues.set(queueKey, queue);
 
-        mockSession.info.participants.push(participant);
+    console.log(`[Demo] Injected message from ${sender.slice(0, 8)}...`);
+  }
 
-        console.log(
-          `[Demo] ${PARTICIPANT_NAMES[index]} joined the session (${index + 1}/${SIMULATED_PARTICIPANTS})`
-        );
-
-        addParticipant(index + 1);
-      }, delay);
+  /**
+   * Get current state for debugging.
+   */
+  getDebugState(): { sessions: MockSession[]; messageQueues: Map<string, ReceivedMessage[]> } {
+    return {
+      sessions: Array.from(this.sessions.values()),
+      messageQueues: this.messageQueues,
     };
-
-    // Start adding participants after a short delay
-    setTimeout(() => addParticipant(0), 1500);
-  }
-
-  /**
-   * Simulate participants submitting commitments.
-   */
-  private simulateCommitments(mockSession: MockSession, signerIds: number[]): void {
-    signerIds.forEach((signerId, index) => {
-      const delay = 1000 + index * 1000 + Math.random() * 1000;
-
-      setTimeout(() => {
-        if (mockSession.info.state !== 'collecting_commitments') return;
-
-        const commitment: SigningCommitment = {
-          participantId: signerId,
-          hiding: randomHex(32),
-          binding: randomHex(32),
-        };
-
-        mockSession.commitments.push(commitment);
-
-        const participant = mockSession.info.participants.find(
-          (p) => p.participantId === signerId
-        );
-        if (participant) {
-          participant.hasCommitment = true;
-        }
-
-        console.log(
-          `[Demo] ${PARTICIPANT_NAMES[signerId - 1] || `Participant ${signerId}`} submitted commitment`
-        );
-
-        // Check if all commitments are in
-        if (mockSession.commitments.length >= mockSession.info.threshold) {
-          mockSession.info.state = 'signing';
-          console.log('[Demo] All commitments received, starting Round 2');
-
-          // Simulate signature shares
-          this.simulateSignatureShares(mockSession, signerIds);
-        }
-      }, delay);
-    });
-  }
-
-  /**
-   * Simulate participants submitting signature shares.
-   */
-  private simulateSignatureShares(mockSession: MockSession, signerIds: number[]): void {
-    signerIds.forEach((signerId, index) => {
-      const delay = 1500 + index * 1000 + Math.random() * 1000;
-
-      setTimeout(() => {
-        if (mockSession.info.state !== 'signing') return;
-
-        const share: FrostSignatureShare = {
-          participantId: signerId,
-          share: randomHex(32),
-        };
-
-        mockSession.signatureShares.push(share);
-
-        const participant = mockSession.info.participants.find(
-          (p) => p.participantId === signerId
-        );
-        if (participant) {
-          participant.hasSignatureShare = true;
-        }
-
-        console.log(
-          `[Demo] ${PARTICIPANT_NAMES[signerId - 1] || `Participant ${signerId}`} submitted signature share`
-        );
-
-        // Check if all shares are in
-        if (mockSession.signatureShares.length >= mockSession.info.threshold) {
-          mockSession.info.state = 'aggregating';
-          console.log('[Demo] All signature shares received, ready for aggregation');
-        }
-      }, delay);
-    });
-  }
-
-  /**
-   * Get current session for status updates.
-   */
-  getCurrentSession(): MockSession | null {
-    return this.currentSession;
-  }
-
-  /**
-   * Clean up any running simulations.
-   */
-  cleanup(): void {
-    if (this.signingSimulationTimer) {
-      clearTimeout(this.signingSimulationTimer);
-      this.signingSimulationTimer = null;
-    }
   }
 }
 
@@ -684,10 +382,8 @@ export class MockFrostClient {
 // =============================================================================
 
 interface MockSession {
-  info: SessionInfo;
-  inviteCode: string;
-  commitments: SigningCommitment[];
-  signatureShares: FrostSignatureShare[];
-  aggregateSignature?: AggregateSignature;
-  messages: EncryptedMessage[];
+  session_id: SessionId;
+  pubkeys: PublicKey[];
+  message_count: number;
+  coordinator_pubkey: PublicKey;
 }

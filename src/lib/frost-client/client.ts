@@ -1,8 +1,19 @@
 /**
  * FROST Client
  *
- * Main client class for interacting with the frostd server.
- * Provides methods for authentication, session management, and signing ceremonies.
+ * Client for interacting with the frostd server.
+ * Implements the official frostd spec: https://frost.zfnd.org/zcash/server.html
+ *
+ * Endpoints:
+ * - POST /challenge - Get authentication challenge (returns UUID)
+ * - POST /login - Authenticate with signed challenge
+ * - POST /logout - Invalidate access token
+ * - POST /create_new_session - Create signing session (coordinator)
+ * - POST /list_sessions - List user's sessions
+ * - POST /get_session_info - Get session details
+ * - POST /send - Send encrypted message
+ * - POST /receive - Receive encrypted messages (polling)
+ * - POST /close_session - Close session (coordinator)
  */
 
 import type {
@@ -10,43 +21,20 @@ import type {
   RequestOptions,
   PublicKey,
   SessionId,
-  SessionInfo,
-  SessionState,
-  MessageType,
-  EncryptedMessage,
-  SigningCommitment,
-  FrostSignatureShare,
-  AggregateSignature,
-  // Request types
-  ChallengeRequest,
   ChallengeResponse,
   LoginRequest,
   LoginResponse,
   CreateSessionRequest,
   CreateSessionResponse,
-  ListSessionsRequest,
   ListSessionsResponse,
   GetSessionInfoRequest,
   GetSessionInfoResponse,
-  JoinSessionRequest,
-  JoinSessionResponse,
   CloseSessionRequest,
-  CloseSessionResponse,
-  SendMessageRequest,
-  SendMessageResponse,
-  ReceiveMessagesRequest,
-  ReceiveMessagesResponse,
-  StartSigningRequest,
-  StartSigningResponse,
-  SubmitCommitmentRequest,
-  SubmitCommitmentResponse,
-  GetCommitmentsRequest,
-  GetCommitmentsResponse,
-  SubmitSignatureShareRequest,
-  SubmitSignatureShareResponse,
-  AggregateSignatureRequest,
-  AggregateSignatureResponse,
-} from '@/types';
+  SendRequest,
+  ReceiveRequest,
+  ReceiveResponse,
+  ReceivedMessage,
+} from '@/types/api';
 import { HttpClient } from './http-client';
 import { AuthenticationError } from './errors';
 
@@ -54,10 +42,9 @@ import { AuthenticationError } from './errors';
  * Event types emitted by the client.
  */
 export type FrostClientEvent =
-  | { type: 'authenticated'; token: string }
+  | { type: 'authenticated'; accessToken: string }
   | { type: 'logged_out' }
-  | { type: 'session_created'; session: SessionInfo }
-  | { type: 'session_joined'; session: SessionInfo; participantId: number }
+  | { type: 'session_created'; sessionId: SessionId }
   | { type: 'token_expired' };
 
 /**
@@ -67,6 +54,7 @@ export type FrostClientEventHandler = (event: FrostClientEvent) => void;
 
 /**
  * Main client for interacting with the frostd server.
+ * Implements the official frostd REST API.
  */
 export class FrostClient {
   private http: HttpClient;
@@ -113,8 +101,8 @@ export class FrostClient {
     if (!this.http.isAuthenticated()) {
       return false;
     }
-    // Check if token has expired
-    if (this.tokenExpiresAt && Date.now() / 1000 > this.tokenExpiresAt) {
+    // Check if token has expired (tokens valid for 1 hour)
+    if (this.tokenExpiresAt && Date.now() > this.tokenExpiresAt) {
       this.logout();
       return false;
     }
@@ -123,60 +111,70 @@ export class FrostClient {
 
   /**
    * Get an authentication challenge from the server.
+   * POST /challenge - no request body required
    */
-  async getChallenge(
-    pubkey: PublicKey,
-    options?: RequestOptions
-  ): Promise<ChallengeResponse> {
-    const request: ChallengeRequest = { pubkey };
-    return this.http.postUnauthenticated<ChallengeRequest, ChallengeResponse>(
+  async getChallenge(options?: RequestOptions): Promise<ChallengeResponse> {
+    return this.http.postUnauthenticated<Record<string, never>, ChallengeResponse>(
       '/challenge',
-      request,
+      {},
       options
     );
   }
 
   /**
    * Authenticate with the server using a signed challenge.
+   * POST /login
+   *
+   * @param challenge - UUID challenge from /challenge
+   * @param pubkey - Ed25519 public key (hex-encoded)
+   * @param signature - XEdDSA signature over challenge UUID bytes (hex-encoded)
    */
   async login(
-    pubkey: PublicKey,
     challenge: string,
+    pubkey: PublicKey,
     signature: string,
     options?: RequestOptions
   ): Promise<LoginResponse> {
-    const request: LoginRequest = { pubkey, challenge, signature };
+    const request: LoginRequest = { challenge, pubkey, signature };
     const response = await this.http.postUnauthenticated<LoginRequest, LoginResponse>(
       '/login',
       request,
       options
     );
 
-    // Store the token
-    this.http.setToken(response.token);
-    this.tokenExpiresAt = response.expiresAt;
+    // Store the token (valid for 1 hour)
+    this.http.setAccessToken(response.access_token);
+    this.tokenExpiresAt = Date.now() + 60 * 60 * 1000; // 1 hour
 
     // Emit authenticated event
-    this.emit({ type: 'authenticated', token: response.token });
+    this.emit({ type: 'authenticated', accessToken: response.access_token });
 
     return response;
   }
 
   /**
-   * Log out and clear the authentication token.
+   * Log out and invalidate the access token.
+   * POST /logout
    */
-  logout(): void {
-    this.http.setToken(null);
+  async logout(options?: RequestOptions): Promise<void> {
+    if (this.http.isAuthenticated()) {
+      try {
+        await this.http.post('/logout', {}, options);
+      } catch {
+        // Ignore errors during logout
+      }
+    }
+    this.http.setAccessToken(null);
     this.tokenExpiresAt = null;
     this.emit({ type: 'logged_out' });
   }
 
   /**
-   * Set an existing token (e.g., from storage).
+   * Set an existing access token (e.g., from storage).
    */
-  setToken(token: string, expiresAt?: number): void {
-    this.http.setToken(token);
-    this.tokenExpiresAt = expiresAt ?? null;
+  setAccessToken(token: string, expiresAt?: number): void {
+    this.http.setAccessToken(token);
+    this.tokenExpiresAt = expiresAt ?? Date.now() + 60 * 60 * 1000;
   }
 
   // ===========================================================================
@@ -185,25 +183,21 @@ export class FrostClient {
 
   /**
    * Create a new signing session (coordinator only).
+   * POST /create_new_session
+   *
+   * @param pubkeys - Public keys of all participants
+   * @param messageCount - Number of messages to sign
    */
   async createSession(
-    params: {
-      name: string;
-      threshold: number;
-      maxParticipants: number;
-      durationSeconds?: number;
-      description?: string;
-    },
+    pubkeys: PublicKey[],
+    messageCount: number,
     options?: RequestOptions
   ): Promise<CreateSessionResponse> {
     this.ensureAuthenticated();
 
     const request: CreateSessionRequest = {
-      name: params.name,
-      threshold: params.threshold,
-      maxParticipants: params.maxParticipants,
-      durationSeconds: params.durationSeconds,
-      description: params.description,
+      pubkeys,
+      message_count: messageCount,
     };
 
     const response = await this.http.post<CreateSessionRequest, CreateSessionResponse>(
@@ -212,43 +206,28 @@ export class FrostClient {
       options
     );
 
-    this.emit({ type: 'session_created', session: response.session });
+    this.emit({ type: 'session_created', sessionId: response.session_id });
 
     return response;
   }
 
   /**
-   * List available sessions.
+   * List sessions for the authenticated user.
+   * POST /list_sessions - empty request body
    */
-  async listSessions(
-    params: {
-      state?: SessionState | SessionState[];
-      participating?: boolean;
-      coordinating?: boolean;
-      limit?: number;
-      offset?: number;
-    } = {},
-    options?: RequestOptions
-  ): Promise<ListSessionsResponse> {
+  async listSessions(options?: RequestOptions): Promise<ListSessionsResponse> {
     this.ensureAuthenticated();
 
-    const request: ListSessionsRequest = {
-      state: params.state,
-      participating: params.participating,
-      coordinating: params.coordinating,
-      limit: params.limit,
-      offset: params.offset,
-    };
-
-    return this.http.post<ListSessionsRequest, ListSessionsResponse>(
+    return this.http.post<Record<string, never>, ListSessionsResponse>(
       '/list_sessions',
-      request,
+      {},
       options
     );
   }
 
   /**
    * Get detailed information about a session.
+   * POST /get_session_info
    */
   async getSessionInfo(
     sessionId: SessionId,
@@ -256,7 +235,7 @@ export class FrostClient {
   ): Promise<GetSessionInfoResponse> {
     this.ensureAuthenticated();
 
-    const request: GetSessionInfoRequest = { sessionId };
+    const request: GetSessionInfoRequest = { session_id: sessionId };
     return this.http.post<GetSessionInfoRequest, GetSessionInfoResponse>(
       '/get_session_info',
       request,
@@ -265,43 +244,14 @@ export class FrostClient {
   }
 
   /**
-   * Join a session as a participant.
-   */
-  async joinSession(
-    sessionId: SessionId,
-    inviteCode: string,
-    options?: RequestOptions
-  ): Promise<JoinSessionResponse> {
-    this.ensureAuthenticated();
-
-    const request: JoinSessionRequest = { sessionId, inviteCode };
-    const response = await this.http.post<JoinSessionRequest, JoinSessionResponse>(
-      '/join_session',
-      request,
-      options
-    );
-
-    this.emit({
-      type: 'session_joined',
-      session: response.session,
-      participantId: response.participantId,
-    });
-
-    return response;
-  }
-
-  /**
    * Close a session (coordinator only).
+   * POST /close_session
    */
-  async closeSession(
-    sessionId: SessionId,
-    reason?: string,
-    options?: RequestOptions
-  ): Promise<CloseSessionResponse> {
+  async closeSession(sessionId: SessionId, options?: RequestOptions): Promise<void> {
     this.ensureAuthenticated();
 
-    const request: CloseSessionRequest = { sessionId, reason };
-    return this.http.post<CloseSessionRequest, CloseSessionResponse>(
+    const request: CloseSessionRequest = { session_id: sessionId };
+    await this.http.post<CloseSessionRequest, Record<string, never>>(
       '/close_session',
       request,
       options
@@ -309,177 +259,104 @@ export class FrostClient {
   }
 
   // ===========================================================================
-  // Messaging
+  // Messaging (for FROST ceremony coordination)
   // ===========================================================================
 
   /**
    * Send an encrypted message to participants.
+   * POST /send
+   *
+   * Messages MUST be end-to-end encrypted before sending.
+   *
+   * @param sessionId - Session context
+   * @param recipients - Recipient public keys (empty array = send to coordinator)
+   * @param msg - Hex-encoded encrypted message
    */
-  async sendMessage(
-    params: {
-      sessionId: SessionId;
-      recipient: PublicKey | 'broadcast';
-      messageType: MessageType;
-      ciphertext: string;
-      nonce: string;
-    },
+  async send(
+    sessionId: SessionId,
+    recipients: PublicKey[],
+    msg: string,
     options?: RequestOptions
-  ): Promise<SendMessageResponse> {
+  ): Promise<void> {
     this.ensureAuthenticated();
 
-    const request: SendMessageRequest = {
-      sessionId: params.sessionId,
-      recipient: params.recipient,
-      messageType: params.messageType,
-      ciphertext: params.ciphertext,
-      nonce: params.nonce,
+    const request: SendRequest = {
+      session_id: sessionId,
+      recipients,
+      msg,
     };
 
-    return this.http.post<SendMessageRequest, SendMessageResponse>(
-      '/send',
-      request,
-      options
-    );
+    await this.http.post<SendRequest, Record<string, never>>('/send', request, options);
   }
 
   /**
    * Receive encrypted messages.
+   * POST /receive
+   *
+   * This is a polling endpoint - call repeatedly to get new messages.
+   *
+   * @param sessionId - Session context
+   * @param asCoordinator - True if receiving as coordinator
    */
-  async receiveMessages(
-    params: {
-      sessionId: SessionId;
-      afterMessageId?: string;
-      messageTypes?: MessageType[];
-      limit?: number;
-      timeout?: number;
-    },
+  async receive(
+    sessionId: SessionId,
+    asCoordinator: boolean,
     options?: RequestOptions
-  ): Promise<ReceiveMessagesResponse> {
+  ): Promise<ReceivedMessage[]> {
     this.ensureAuthenticated();
 
-    const request: ReceiveMessagesRequest = {
-      sessionId: params.sessionId,
-      afterMessageId: params.afterMessageId,
-      messageTypes: params.messageTypes,
-      limit: params.limit,
-      timeout: params.timeout,
+    const request: ReceiveRequest = {
+      session_id: sessionId,
+      as_coordinator: asCoordinator,
     };
 
-    // Use long polling if timeout is specified
-    if (params.timeout && params.timeout > 0) {
-      return this.http.longPoll<ReceiveMessagesRequest, ReceiveMessagesResponse>(
-        '/receive',
-        request,
-        params.timeout * 1000,
-        options
-      );
-    }
-
-    return this.http.post<ReceiveMessagesRequest, ReceiveMessagesResponse>(
+    const response = await this.http.post<ReceiveRequest, ReceiveResponse>(
       '/receive',
       request,
       options
     );
+
+    return response.msgs || [];
   }
 
   // ===========================================================================
-  // Signing Ceremony
+  // Polling Helper
   // ===========================================================================
 
   /**
-   * Start the signing ceremony (coordinator only).
+   * Poll for messages with automatic retry.
+   * Useful for implementing the FROST ceremony flow.
+   *
+   * @param sessionId - Session to poll
+   * @param asCoordinator - Whether receiving as coordinator
+   * @param intervalMs - Polling interval in milliseconds
+   * @param signal - AbortSignal to stop polling
+   * @param onMessages - Callback when messages are received
    */
-  async startSigning(
-    params: {
-      sessionId: SessionId;
-      message: string;
-      signerIds: number[];
-    },
-    options?: RequestOptions
-  ): Promise<StartSigningResponse> {
-    this.ensureAuthenticated();
-
-    const request: StartSigningRequest = {
-      sessionId: params.sessionId,
-      message: params.message,
-      signerIds: params.signerIds,
-    };
-
-    return this.http.post<StartSigningRequest, StartSigningResponse>(
-      '/start_signing',
-      request,
-      options
-    );
-  }
-
-  /**
-   * Submit a commitment for Round 1 of signing.
-   */
-  async submitCommitment(
+  async pollMessages(
     sessionId: SessionId,
-    commitment: SigningCommitment,
-    options?: RequestOptions
-  ): Promise<SubmitCommitmentResponse> {
-    this.ensureAuthenticated();
+    asCoordinator: boolean,
+    intervalMs: number,
+    signal: AbortSignal,
+    onMessages: (messages: ReceivedMessage[]) => void
+  ): Promise<void> {
+    while (!signal.aborted) {
+      try {
+        const messages = await this.receive(sessionId, asCoordinator, { signal });
+        if (messages.length > 0) {
+          onMessages(messages);
+        }
+      } catch (error) {
+        if (signal.aborted) break;
+        console.error('Polling error:', error);
+      }
 
-    const request: SubmitCommitmentRequest = { sessionId, commitment };
-    return this.http.post<SubmitCommitmentRequest, SubmitCommitmentResponse>(
-      '/submit_commitment',
-      request,
-      options
-    );
-  }
-
-  /**
-   * Get all commitments for Round 2 of signing.
-   */
-  async getCommitments(
-    sessionId: SessionId,
-    options?: RequestOptions
-  ): Promise<GetCommitmentsResponse> {
-    this.ensureAuthenticated();
-
-    const request: GetCommitmentsRequest = { sessionId };
-    return this.http.post<GetCommitmentsRequest, GetCommitmentsResponse>(
-      '/get_commitments',
-      request,
-      options
-    );
-  }
-
-  /**
-   * Submit a signature share for Round 2 of signing.
-   */
-  async submitSignatureShare(
-    sessionId: SessionId,
-    signatureShare: FrostSignatureShare,
-    options?: RequestOptions
-  ): Promise<SubmitSignatureShareResponse> {
-    this.ensureAuthenticated();
-
-    const request: SubmitSignatureShareRequest = { sessionId, signatureShare };
-    return this.http.post<SubmitSignatureShareRequest, SubmitSignatureShareResponse>(
-      '/submit_signature_share',
-      request,
-      options
-    );
-  }
-
-  /**
-   * Aggregate signature shares into final signature (coordinator only).
-   */
-  async aggregateSignature(
-    sessionId: SessionId,
-    options?: RequestOptions
-  ): Promise<AggregateSignatureResponse> {
-    this.ensureAuthenticated();
-
-    const request: AggregateSignatureRequest = { sessionId };
-    return this.http.post<AggregateSignatureRequest, AggregateSignatureResponse>(
-      '/aggregate',
-      request,
-      options
-    );
+      // Wait for next poll interval
+      await new Promise((resolve) => {
+        const timeout = setTimeout(resolve, intervalMs);
+        signal.addEventListener('abort', () => clearTimeout(timeout), { once: true });
+      });
+    }
   }
 
   // ===========================================================================

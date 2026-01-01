@@ -1,7 +1,8 @@
 /**
  * FROST Client Library
  *
- * TypeScript client for the frostd REST API and WebSocket server.
+ * TypeScript client for the frostd REST API.
+ * Implements the official spec: https://frost.zfnd.org/zcash/server.html
  */
 
 // Main client class
@@ -9,15 +10,6 @@ export { FrostClient, type FrostClientEvent, type FrostClientEventHandler } from
 
 // Mock client for demo mode
 export { MockFrostClient } from './mock-client';
-
-// WebSocket client
-export {
-  WsClient,
-  type WsClientConfig,
-  type ConnectionState,
-  type WsEventHandler,
-  type ConnectionStateHandler,
-} from './websocket-client';
 
 // HTTP client (for advanced usage)
 export { HttpClient } from './http-client';
@@ -38,5 +30,23 @@ export {
 export type {
   FrostdConfig,
   RequestOptions,
-  ApiResponse,
-} from '@/types';
+  PublicKey,
+  SessionId,
+  ChallengeResponse,
+  LoginRequest,
+  LoginResponse,
+  CreateSessionRequest,
+  CreateSessionResponse,
+  ListSessionsResponse,
+  GetSessionInfoRequest,
+  GetSessionInfoResponse,
+  CloseSessionRequest,
+  CloseSessionResponse,
+  SendRequest,
+  SendResponse,
+  ReceiveRequest,
+  ReceiveResponse,
+  ReceivedMessage,
+  FrostError,
+  FrostErrorCode,
+} from '@/types/api';

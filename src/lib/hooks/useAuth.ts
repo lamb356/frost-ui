@@ -74,7 +74,7 @@ export function useAuth(options: UseAuthOptions = {}): UseAuthResult {
 
     // Set existing token if available
     if (accessToken && tokenExpiresAt) {
-      clientRef.current.setToken(accessToken, tokenExpiresAt);
+      clientRef.current.setAccessToken(accessToken, tokenExpiresAt);
     }
 
     return () => {
@@ -96,9 +96,9 @@ export function useAuth(options: UseAuthOptions = {}): UseAuthResult {
     }
 
     // Calculate when to refresh
-    const now = Date.now() / 1000;
-    const refreshAt = tokenExpiresAt - refreshThreshold;
-    const delay = Math.max(0, (refreshAt - now) * 1000);
+    const now = Date.now();
+    const refreshAt = tokenExpiresAt - refreshThreshold * 1000;
+    const delay = Math.max(0, refreshAt - now);
 
     if (delay > 0) {
       refreshTimeoutRef.current = setTimeout(() => {
@@ -114,21 +114,20 @@ export function useAuth(options: UseAuthOptions = {}): UseAuthResult {
     }
 
     try {
-      // Get new challenge
-      const { challenge } = await clientRef.current.getChallenge(pubkey);
+      // Get new challenge (no pubkey required per spec)
+      const { challenge } = await clientRef.current.getChallenge();
 
       // Sign the challenge
       const signature = await signChallenge(privateKeyRef.current, challenge);
 
-      // Login with signed challenge
-      const { token, expiresAt } = await clientRef.current.login(
-        pubkey,
-        challenge,
-        signature
-      );
+      // Login with signed challenge (challenge, pubkey, signature per spec)
+      const response = await clientRef.current.login(challenge, pubkey, signature);
+
+      // Token is valid for 1 hour per spec
+      const expiresAt = Date.now() + 60 * 60 * 1000;
 
       // Update store
-      setAuthenticated(token, pubkey, expiresAt);
+      setAuthenticated(response.access_token, pubkey, expiresAt);
 
       // Schedule next refresh
       scheduleRefresh();
@@ -155,21 +154,24 @@ export function useAuth(options: UseAuthOptions = {}): UseAuthResult {
       const keys = await loadAuthKeys(password);
       privateKeyRef.current = keys.privateKey;
 
-      // Get challenge from server
-      const { challenge } = await clientRef.current.getChallenge(keys.publicKey);
+      // Get challenge from server (no pubkey required per spec)
+      const { challenge } = await clientRef.current.getChallenge();
 
       // Sign the challenge
       const signature = await signChallenge(keys.privateKey, challenge);
 
-      // Login with signed challenge
-      const { token, expiresAt } = await clientRef.current.login(
-        keys.publicKey,
+      // Login with signed challenge (challenge, pubkey, signature per spec)
+      const response = await clientRef.current.login(
         challenge,
+        keys.publicKey,
         signature
       );
 
+      // Token is valid for 1 hour per spec
+      const expiresAt = Date.now() + 60 * 60 * 1000;
+
       // Update store
-      setAuthenticated(token, keys.publicKey, expiresAt);
+      setAuthenticated(response.access_token, keys.publicKey, expiresAt);
 
       // Schedule refresh
       scheduleRefresh();
@@ -229,7 +231,7 @@ export function useAuth(options: UseAuthOptions = {}): UseAuthResult {
     }
 
     const checkExpiry = () => {
-      const now = Date.now() / 1000;
+      const now = Date.now();
       if (now >= tokenExpiresAt) {
         // Token expired, logout
         logout();
@@ -275,7 +277,7 @@ export function useFrostClient(): FrostClient | null {
     }
 
     const client = new FrostClient({ baseUrl: frostdUrl });
-    client.setToken(accessToken, tokenExpiresAt ?? undefined);
+    client.setAccessToken(accessToken, tokenExpiresAt ?? undefined);
     clientRef.current = client;
   }, [frostdUrl, accessToken, tokenExpiresAt]);
 
