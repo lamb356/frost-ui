@@ -7,6 +7,7 @@ This document describes the integration of real FROST cryptographic operations v
 | Component | Status | Notes |
 |-----------|--------|-------|
 | **Ed25519 Auth** | ✅ Production | Real @noble/ed25519 signing (see XEdDSA note below) |
+| **Challenge Signing** | ✅ Production | Signs UUID as 16-byte binary per spec |
 | **Ed25519 ↔ X25519** | ✅ Production | Real key conversion via @noble/curves |
 | **X25519 E2E Encryption** | ✅ Production | Real ECDH + AES-GCM for message encryption |
 | **Password Key Storage** | ✅ Production | PBKDF2 + AES-GCM for local key encryption |
@@ -84,6 +85,37 @@ const signature = await ed.signAsync(messageBytes, privateKey);
 ```
 
 **Recommendation:** Test with your frostd server. If Ed25519 signatures are rejected, XEdDSA implementation would be needed.
+
+## Challenge Signing (UUID Binary Format)
+
+The frostd `/challenge` endpoint returns a UUID (e.g., `550e8400-e29b-41d4-a716-446655440000`). Per the spec, this UUID must be signed as its **16-byte binary representation**, NOT as a UTF-8 string.
+
+### Binary vs String Format
+
+| Format | Bytes | Example |
+|--------|-------|---------|
+| UTF-8 String | 36 bytes | `"550e8400-e29b-41d4-a716-446655440000"` as ASCII |
+| Binary (Correct) | 16 bytes | `0x55 0x0e 0x84 0x00 0xe2 0x9b ...` |
+
+### Implementation
+
+```typescript
+// Convert UUID string to 16-byte binary
+function uuidToBytes(uuid: string): Uint8Array {
+  const hex = uuid.replace(/-/g, '');  // Remove hyphens
+  const bytes = new Uint8Array(16);
+  for (let i = 0; i < 16; i++) {
+    bytes[i] = parseInt(hex.substring(i * 2, i * 2 + 2), 16);
+  }
+  return bytes;
+}
+
+// Sign the 16-byte binary (spec-compliant)
+const challengeBytes = uuidToBytes(challenge);
+const signature = await ed.signAsync(challengeBytes, privateKey);
+```
+
+This ensures byte-level compatibility with frostd servers even if there are other signature scheme differences.
 
 ## Curve Compatibility (Critical for Zcash)
 

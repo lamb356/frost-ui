@@ -120,6 +120,33 @@ export function stringToBytes(str: string): Uint8Array {
 }
 
 /**
+ * Convert a UUID string to its 16-byte binary representation.
+ *
+ * UUIDs are 128-bit (16-byte) identifiers typically displayed as
+ * 32 hex digits with hyphens (e.g., "550e8400-e29b-41d4-a716-446655440000").
+ * This function strips the hyphens and converts to bytes.
+ *
+ * Per the frostd spec, the challenge is a UUID that should be signed
+ * as its binary form, not as a UTF-8 string.
+ *
+ * @param uuid - UUID string in standard format (with or without hyphens)
+ * @returns 16-byte Uint8Array
+ */
+export function uuidToBytes(uuid: string): Uint8Array {
+  // Remove hyphens and validate
+  const hex = uuid.replace(/-/g, '');
+  if (hex.length !== 32) {
+    throw new Error(`Invalid UUID: expected 32 hex chars, got ${hex.length}`);
+  }
+  // Convert 32 hex characters to 16 bytes
+  const bytes = new Uint8Array(16);
+  for (let i = 0; i < 16; i++) {
+    bytes[i] = parseInt(hex.substring(i * 2, i * 2 + 2), 16);
+  }
+  return bytes;
+}
+
+/**
  * Decode a Uint8Array to string using UTF-8.
  */
 export function bytesToString(bytes: Uint8Array): string {
@@ -170,8 +197,13 @@ export async function generateAuthKeyPair(): Promise<Ed25519KeyPair> {
 /**
  * Sign a challenge for frostd authentication using Ed25519.
  *
- * The frostd spec requires Ed25519 signatures. The challenge is a UUID string,
- * and we sign the raw UUID bytes (UTF-8 encoded).
+ * Per the frostd spec, the challenge is a UUID that must be signed as its
+ * 16-byte binary representation (NOT as a UTF-8 string). The UUID is converted
+ * from its string form (e.g., "550e8400-e29b-41d4-a716-446655440000") to
+ * 16 bytes by stripping hyphens and parsing as hex.
+ *
+ * NOTE: The frostd spec technically requires XEdDSA signatures, but this
+ * implementation uses standard Ed25519. See module header for details.
  *
  * @param privateKeyHex - Ed25519 private key (32 bytes, hex-encoded)
  * @param challenge - UUID challenge string from /challenge endpoint
@@ -182,9 +214,9 @@ export async function signChallenge(
   challenge: string
 ): Promise<string> {
   const privateKey = hexToBytes(privateKeyHex);
-  // Sign the raw UUID bytes (UTF-8 encoded)
-  const messageBytes = stringToBytes(challenge);
-  const signature = await ed.signAsync(messageBytes, privateKey);
+  // Sign the UUID as 16-byte binary (spec-compliant), not UTF-8 string
+  const challengeBytes = uuidToBytes(challenge);
+  const signature = await ed.signAsync(challengeBytes, privateKey);
   return bytesToHex(signature);
 }
 
@@ -211,6 +243,38 @@ export async function verifySignature(
     if (signature.length !== 64) return false;
 
     return await ed.verifyAsync(signature, messageBytes, publicKey);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Verify an Ed25519 signature on a UUID challenge.
+ *
+ * This is the counterpart to signChallenge - it verifies a signature
+ * where the message was the 16-byte binary form of a UUID.
+ *
+ * @param publicKeyHex - Ed25519 public key (32 bytes, hex-encoded)
+ * @param challenge - The UUID challenge that was signed
+ * @param signatureHex - Ed25519 signature (64 bytes, hex-encoded)
+ * @returns true if signature is valid
+ */
+export async function verifyChallengeSignature(
+  publicKeyHex: string,
+  challenge: string,
+  signatureHex: string
+): Promise<boolean> {
+  try {
+    const publicKey = hexToBytes(publicKeyHex);
+    // Use UUID binary format (same as signChallenge)
+    const challengeBytes = uuidToBytes(challenge);
+    const signature = hexToBytes(signatureHex);
+
+    // Validate lengths
+    if (publicKey.length !== 32) return false;
+    if (signature.length !== 64) return false;
+
+    return await ed.verifyAsync(signature, challengeBytes, publicKey);
   } catch {
     return false;
   }
