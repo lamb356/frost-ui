@@ -1,36 +1,144 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# FROST Multi-Sig UI
+
+A Next.js web application for FROST (Flexible Round-Optimized Schnorr Threshold) multi-signature operations, designed for Zcash threshold signing ceremonies.
+
+## Features
+
+- **Threshold Key Generation**: Create t-of-n key shares using trusted dealer or distributed key generation
+- **Signing Ceremonies**: Coordinate multi-party signing sessions with real-time status
+- **WASM Cryptography**: Real FROST operations via WebAssembly (with mock fallback)
+- **Session Management**: Track active and completed signing sessions
+- **Demo Mode**: Test the full flow without connecting to a frostd server
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     Next.js Application                      │
+├─────────────────────────────────────────────────────────────┤
+│  React Components (shadcn/ui)                               │
+│  ├── Key Generation Wizard                                  │
+│  ├── Signing Session Manager                                │
+│  └── Participant Coordination                               │
+├─────────────────────────────────────────────────────────────┤
+│  State Management (Zustand)                                 │
+│  └── Sessions, Participants, Connection Status              │
+├─────────────────────────────────────────────────────────────┤
+│  FROST WASM Module                                          │
+│  ├── frost-ed25519 (Ed25519 signatures)                     │
+│  ├── Key generation, commitment, signing, aggregation       │
+│  └── Falls back to mock if WASM unavailable                 │
+├─────────────────────────────────────────────────────────────┤
+│  frostd Connection                                          │
+│  └── REST API to frostd server for ceremony coordination    │
+└─────────────────────────────────────────────────────────────┘
+```
 
 ## Getting Started
 
-First, run the development server:
+### Prerequisites
+
+- Node.js 18+
+- npm or yarn
+
+### Installation
 
 ```bash
+# Clone the repository
+git clone https://github.com/YOUR_USERNAME/frost-ui.git
+cd frost-ui
+
+# Install dependencies
+npm install
+
+# Start development server
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open [http://localhost:3000](http://localhost:3000) to view the application.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+### Demo Mode
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+The app includes a demo mode that simulates FROST operations without a real frostd server. Enable it in Settings.
 
-## Learn More
+## WASM Build
 
-To learn more about Next.js, take a look at the following resources:
+The FROST cryptography is compiled from Rust to WebAssembly. WASM builds are automated via GitHub Actions, but you can build locally:
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+### Linux/macOS
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+```bash
+# Install Rust and wasm-pack
+curl https://sh.rustup.rs -sSf | sh
+cargo install wasm-pack
+rustup target add wasm32-unknown-unknown
 
-## Deploy on Vercel
+# Build WASM
+./scripts/build-wasm.sh
+```
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+### Windows
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+See [WASM-INTEGRATION.md](./WASM-INTEGRATION.md) for Windows-specific instructions.
+
+### CI/CD
+
+WASM is automatically built on push via GitHub Actions. The workflow:
+1. Builds and tests the Next.js application
+2. Compiles WASM on Ubuntu (avoiding Windows toolchain issues)
+3. Uploads WASM artifacts for use in deployments
+
+## Project Structure
+
+```
+frost-ui/
+├── src/
+│   ├── app/                    # Next.js app router pages
+│   │   ├── page.tsx            # Home/Dashboard
+│   │   ├── sessions/           # Signing sessions
+│   │   └── settings/           # Configuration
+│   ├── components/             # React components
+│   │   ├── ui/                 # shadcn/ui components
+│   │   └── frost/              # FROST-specific components
+│   └── lib/
+│       ├── frost-wasm/         # Rust WASM module
+│       │   ├── src/lib.rs      # FROST bindings
+│       │   ├── Cargo.toml      # Rust dependencies
+│       │   └── loader.ts       # TypeScript WASM loader
+│       ├── hooks/              # React hooks
+│       └── store.ts            # Zustand state
+├── .github/workflows/          # CI/CD
+└── scripts/                    # Build scripts
+```
+
+## Documentation
+
+- [WASM Integration](./WASM-INTEGRATION.md) - Details on the FROST WASM module
+
+## Development
+
+```bash
+# Run development server
+npm run dev
+
+# Type check
+npm run lint
+
+# Build for production
+npm run build
+```
+
+## Security Considerations
+
+- **Secret Key Storage**: Signing shares must never be logged or stored unencrypted
+- **Nonce Reuse**: Nonces are single-use; reuse compromises security
+- **Demo Mode**: Uses mock cryptography - not for production signing
+
+## Related Projects
+
+- [FROST](https://github.com/ZcashFoundation/frost) - FROST implementation in Rust
+- [frostd](https://github.com/ZcashFoundation/frost) - FROST daemon for ceremony coordination
+
+## License
+
+MIT

@@ -39,3 +39,16 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# WASM build artifacts (built by CI)
+src/lib/frost-wasm/pkg/
+src/lib/frost-wasm/target/
+
+# IDE
+.idea/
+.vscode/
+
+# OS files
+Thumbs.db
+ehthumbs.db
+Desktop.ini

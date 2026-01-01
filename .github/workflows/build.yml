@@ -1,0 +1,101 @@
+name: Build and Test
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  # Job 1: Build and test the Next.js application
+  test-nextjs:
+    name: Test Next.js
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run linter
+        run: npm run lint
+
+      - name: Build Next.js app
+        run: npm run build
+        env:
+          # Skip type checking for WASM imports that may not exist yet
+          NEXT_TELEMETRY_DISABLED: 1
+
+  # Job 2: Build WASM module
+  build-wasm:
+    name: Build WASM
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-action@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install wasm-pack
+        run: cargo install wasm-pack
+
+      - name: Build WASM module
+        working-directory: src/lib/frost-wasm
+        run: wasm-pack build --target web --out-dir pkg
+
+      - name: Upload WASM artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: frost-wasm-pkg
+          path: src/lib/frost-wasm/pkg/
+          retention-days: 30
+
+  # Job 3: Commit WASM artifacts back to repo (only on main branch push)
+  commit-wasm:
+    name: Commit WASM
+    runs-on: ubuntu-latest
+    needs: build-wasm
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download WASM artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: frost-wasm-pkg
+          path: src/lib/frost-wasm/pkg/
+
+      - name: Check for changes
+        id: check_changes
+        run: |
+          # Force add even if in .gitignore (we want CI to commit WASM builds)
+          git add --force src/lib/frost-wasm/pkg/
+          if git diff --staged --quiet; then
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+          else
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Commit and push WASM
+        if: steps.check_changes.outputs.has_changes == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git commit -m "chore: update WASM build artifacts [skip ci]"
+          git push
