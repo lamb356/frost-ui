@@ -6,19 +6,38 @@
  *
  * Features:
  * - Ed25519 key generation and signing (for frostd authentication)
+ * - Ed25519 to X25519 key conversion (single keypair for auth + encryption)
  * - X25519 ECDH key exchange with AES-GCM encryption (for E2E messaging)
  * - Password-based key encryption for local storage
  *
- * The frostd spec requires Ed25519 signatures for authentication.
+ * ## IMPORTANT: XEdDSA vs Ed25519 Signature Scheme
+ *
+ * The frostd specification technically requires XEdDSA signatures, which allow
+ * using the same key for both Ed25519 signing AND X25519 encryption. However:
+ *
+ * **Current Implementation:** Standard Ed25519 signatures (RFC 8032)
+ * - Uses @noble/ed25519 for signing
+ * - May work with frostd implementations that accept Ed25519
+ * - Provides proper Ed25519 -> X25519 key conversion for encryption
+ *
+ * **Spec-Strict (XEdDSA):** Would require:
+ * - Converting Ed25519 private key to X25519 format
+ * - Signing with the X25519-derived key using XEdDSA algorithm
+ * - See: https://signal.org/docs/specifications/xeddsa/
+ *
+ * **Recommendation:** Test with your frostd server. Most implementations
+ * accept standard Ed25519 signatures. XEdDSA is documented as future work
+ * if strict spec compliance is required.
+ *
  * See: https://frost.zfnd.org/zcash/server.html
  */
 
 import * as ed from '@noble/ed25519';
-import { x25519 } from '@noble/curves/ed25519.js';
+import { ed25519, x25519 } from '@noble/curves/ed25519.js';
 
-// Enable synchronous methods (optional, for better performance)
-// @noble/ed25519 v2.x uses SHA-512 from @noble/hashes by default
-// For browser compatibility, we use the async versions
+// We use both:
+// - @noble/ed25519 for signAsync/verifyAsync (async-friendly)
+// - @noble/curves/ed25519 for ed25519.utils.toMontgomery (key conversion)
 
 // =============================================================================
 // Types
@@ -367,34 +386,75 @@ export async function decryptMessage(
 }
 
 // =============================================================================
-// Ed25519 to X25519 Conversion
+// Ed25519 to X25519 Conversion (PRODUCTION-READY)
 // =============================================================================
 
 /**
  * Convert an Ed25519 public key to X25519 format.
  *
- * Ed25519 and X25519 use the same underlying curve, so public keys can be
- * converted between formats. This is useful when you have Ed25519 auth keys
- * but need to do ECDH for encryption.
+ * Ed25519 (twisted Edwards curve) and X25519 (Montgomery curve) use the same
+ * underlying Curve25519. This function performs the birational map to convert
+ * an Ed25519 public key to X25519 format, allowing a single keypair to be
+ * used for both authentication (signing) and encryption (ECDH).
  *
- * NOTE: This is a placeholder - actual conversion requires the birational
- * map between the twisted Edwards curve (Ed25519) and Montgomery curve (X25519).
- * For now, users should generate separate X25519 keys for encryption.
+ * Uses @noble/curves ed25519.utils.toMontgomery() for the conversion.
  *
- * DEMO: Returns the input unchanged - production should implement proper conversion.
+ * NOTE: There is NO reverse conversion (X25519 -> Ed25519) because:
+ * - There are 2 valid Ed25519 points for every X25519 point (sign ambiguity)
+ * - X25519 accepts some points on the quadratic twist that have no Ed25519 equivalent
  *
  * @param ed25519PubkeyHex - Ed25519 public key (32 bytes, hex)
  * @returns X25519 public key (32 bytes, hex)
  */
 export function ed25519ToX25519PublicKey(ed25519PubkeyHex: string): string {
-  // TODO: Implement proper Ed25519 -> X25519 conversion
-  // For now, this is a placeholder. In production, you should either:
-  // 1. Use a library that provides this conversion
-  // 2. Generate and store separate X25519 keys for encryption
-  console.warn(
-    'ed25519ToX25519PublicKey: Using placeholder - generate separate X25519 keys for encryption'
-  );
-  return ed25519PubkeyHex;
+  const ed25519Pubkey = hexToBytes(ed25519PubkeyHex);
+  const x25519Pubkey = ed25519.utils.toMontgomery(ed25519Pubkey);
+  return bytesToHex(x25519Pubkey);
+}
+
+/**
+ * Convert an Ed25519 private key to X25519 format.
+ *
+ * This allows using the same seed/private key for both Ed25519 signing
+ * and X25519 ECDH key exchange.
+ *
+ * Uses @noble/curves ed25519.utils.toMontgomerySecret() for the conversion.
+ *
+ * @param ed25519PrivkeyHex - Ed25519 private key (32 bytes, hex)
+ * @returns X25519 private key (32 bytes, hex)
+ */
+export function ed25519ToX25519PrivateKey(ed25519PrivkeyHex: string): string {
+  const ed25519Privkey = hexToBytes(ed25519PrivkeyHex);
+  const x25519Privkey = ed25519.utils.toMontgomerySecret(ed25519Privkey);
+  return bytesToHex(x25519Privkey);
+}
+
+/**
+ * Generate a unified keypair that works for both Ed25519 signing and X25519 encryption.
+ *
+ * This generates an Ed25519 keypair and also computes the corresponding X25519 keys,
+ * allowing a single identity to be used for both authentication and E2E encryption.
+ *
+ * @returns Object with Ed25519 keys (for signing) and X25519 keys (for encryption)
+ */
+export async function generateUnifiedKeyPair(): Promise<{
+  ed25519: Ed25519KeyPair;
+  x25519: X25519KeyPair;
+}> {
+  // Generate Ed25519 keypair
+  const ed25519Keys = await generateAuthKeyPair();
+
+  // Convert to X25519 for encryption
+  const x25519PubKey = ed25519ToX25519PublicKey(ed25519Keys.publicKey);
+  const x25519PrivKey = ed25519ToX25519PrivateKey(ed25519Keys.privateKey);
+
+  return {
+    ed25519: ed25519Keys,
+    x25519: {
+      publicKey: x25519PubKey,
+      privateKey: x25519PrivKey,
+    },
+  };
 }
 
 // =============================================================================
