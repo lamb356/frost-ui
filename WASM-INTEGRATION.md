@@ -2,35 +2,77 @@
 
 This document describes the integration of real FROST cryptographic operations via WebAssembly.
 
-## Status
+## Production Readiness Summary
 
 | Component | Status | Notes |
 |-----------|--------|-------|
-| Rust wrapper crate | ✅ Complete | `src/lib/frost-wasm/` |
-| WASM bindings | ✅ Complete | Uses `wasm-bindgen` |
-| TypeScript loader | ✅ Complete | `src/lib/frost-wasm/loader.ts` |
-| WASM build | ⚠️ Requires Setup | See build instructions |
-| Integration | 🔄 Partial | Falls back to mock if WASM unavailable |
+| **Ed25519 Auth** | ✅ Production | Real @noble/ed25519 signing for frostd auth |
+| **X25519 E2E Encryption** | ✅ Production | Real ECDH + AES-GCM for message encryption |
+| **Password Key Storage** | ✅ Production | PBKDF2 + AES-GCM for local key encryption |
+| **FROST WASM (Ed25519)** | ⚠️ Demo Only | Works but wrong curve for Zcash |
+| **FROST WASM (Zcash)** | ❌ Not Started | Requires frost-rerandomized |
+| **frostd Client** | ✅ Production | Matches official spec |
+| **State Machines** | ⚠️ Demo Only | Works but `inviteCode` is not in frostd spec |
 
-## Important: Curve Compatibility
+## What's Demo vs Production
 
-> **Note:** The current implementation uses **frost-ed25519** (Ed25519 curve) for demonstration and testing purposes. This is intentional and NOT a bug.
+### Production-Ready Components
 
-**For production Zcash usage, the following changes are required:**
+These components use real cryptography and match the frostd specification:
 
-| Zcash Pool | Required Crate | Curve |
-|------------|----------------|-------|
-| Orchard (NU5+) | `frost-rerandomized` | RedPallas (Pasta curves) |
-| Sapling | `frost-rerandomized` | Jubjub |
-| Transparent | `frost-secp256k1` | secp256k1 |
+1. **Authentication Crypto** (`src/lib/crypto/index.ts`)
+   - Real Ed25519 key generation via @noble/ed25519
+   - Real Ed25519 signing for /login challenge
+   - Real X25519 ECDH key exchange for E2E encryption
+   - Real AES-256-GCM encryption with HKDF key derivation
+   - Real PBKDF2 password-based key derivation
 
-**Why Ed25519 for now:**
-1. It's stable and well-tested in the frost crate ecosystem
-2. The API is identical across curves - switching is a one-line change
+2. **frostd REST Client** (`src/lib/frost-client/`)
+   - Implements all endpoints from the official spec
+   - /challenge, /login, /create_new_session, /list_sessions
+   - /get_session_info, /send, /receive, /close_session
+   - Proper polling-based message receiving
+
+### Demo-Only Components
+
+These components work but need changes for production:
+
+1. **FROST WASM Bindings** (`src/lib/frost-wasm/`)
+   - Uses frost-ed25519 (Ed25519 curve)
+   - Zcash requires frost-rerandomized (Pasta/Jubjub curves)
+   - The API is identical - only the Rust dependency changes
+
+2. **State Machine `inviteCode`** (`src/lib/state-machines/`)
+   - The frostd spec does NOT have an invite code concept
+   - Sessions are identified by session_id only
+   - Participants join by knowing the session_id and being in the pubkeys list
+
+3. **Ed25519 to X25519 Conversion**
+   - Currently a placeholder that returns the input unchanged
+   - Should either implement proper birational map conversion
+   - Or store separate X25519 keys for encryption (recommended)
+
+## Curve Compatibility (Critical for Zcash)
+
+> **Warning:** The current WASM implementation uses **frost-ed25519** (Ed25519 curve) for demonstration. This is intentional for development but will NOT work with Zcash transactions.
+
+### Why Ed25519 for Demo?
+
+1. Ed25519 is stable and well-tested in the frost crate ecosystem
+2. The FROST API is identical across curves - switching is a one-line change
 3. Allows UI development to proceed without waiting for curve-specific issues
 4. `frost-rerandomized` requires additional work for WASM compatibility
 
-**Migration path:**
+### Production Curve Requirements
+
+| Zcash Pool | Required Crate | Curve | Status |
+|------------|----------------|-------|--------|
+| Orchard (NU5+) | `frost-rerandomized` | RedPallas (Pasta curves) | Not implemented |
+| Sapling | `frost-rerandomized` | Jubjub | Not implemented |
+| Transparent | `frost-secp256k1` | secp256k1 | Not implemented |
+
+### Migration Path
+
 ```rust
 // Current (demo):
 use frost_ed25519 as frost;
@@ -41,7 +83,30 @@ use frost_rerandomized as frost;
 
 The TypeScript interface remains unchanged - only the Rust crate dependency changes.
 
-This is documented as **future work** and is not a blocker for the UI grant.
+## Milestones to Production
+
+### Phase 1: Current State (Demo)
+- [x] Ed25519 authentication crypto (PRODUCTION)
+- [x] X25519 E2E encryption (PRODUCTION)
+- [x] frostd REST client matching spec (PRODUCTION)
+- [x] FROST WASM with Ed25519 curve (DEMO)
+- [x] State machines for ceremony flow (DEMO)
+- [x] Mock client for offline development
+
+### Phase 2: Curve Migration
+- [ ] Update frost-wasm to use frost-rerandomized
+- [ ] Test WASM builds on all platforms
+- [ ] Verify signature compatibility with Zcash nodes
+
+### Phase 3: Spec Compliance
+- [ ] Remove inviteCode from state machines
+- [ ] Implement proper Ed25519 -> X25519 key conversion
+- [ ] Add real transaction parsing for Zcash
+
+### Phase 4: Production Hardening
+- [ ] Implement proper DKG (vs trusted dealer)
+- [ ] Add key resharing capability
+- [ ] Security audit of crypto code
 
 ## Architecture
 
@@ -49,22 +114,28 @@ This is documented as **future work** and is not a blocker for the UI grant.
 ┌─────────────────────────────────────────────────────────────┐
 │                     Next.js Application                      │
 ├─────────────────────────────────────────────────────────────┤
+│  Crypto Module (src/lib/crypto/) - PRODUCTION               │
+│  ├── Ed25519 signing via @noble/ed25519                     │
+│  ├── X25519 ECDH via @noble/curves                          │
+│  └── AES-GCM via WebCrypto API                              │
+├─────────────────────────────────────────────────────────────┤
 │  TypeScript Loader (loader.ts)                              │
 │  ├── Dynamically loads WASM module                          │
 │  ├── Provides typed wrapper functions                       │
 │  └── Falls back to mock implementation if WASM unavailable  │
 ├─────────────────────────────────────────────────────────────┤
-│  WASM Module (frost_wasm.wasm)                              │
+│  WASM Module (frost_wasm.wasm) - DEMO ONLY                  │
 │  └── Compiled from Rust with wasm-bindgen                   │
+│  └── Uses frost-ed25519 (NOT Zcash-compatible)              │
 ├─────────────────────────────────────────────────────────────┤
 │  Rust Crate (frost-wasm)                                    │
-│  ├── frost-ed25519 - Ed25519 FROST implementation           │
+│  ├── frost-ed25519 - Ed25519 FROST (demo)                   │
 │  ├── wasm-bindgen - JS/WASM interop                         │
 │  └── serde_json - Data serialization                        │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-## Exposed Functions
+## Exposed WASM Functions
 
 The WASM module exposes these functions:
 
@@ -329,13 +400,16 @@ module.exports = nextConfig;
 ✅ Signature verification
 ✅ TypeScript type safety
 ✅ Fallback to mock implementation
+✅ Real Ed25519 authentication
+✅ Real X25519 E2E encryption
 
 ## What Doesn't Work (Yet)
 
 ❌ Distributed Key Generation (DKG)
-❌ Zcash-specific curves
+❌ Zcash-specific curves (frost-rerandomized)
 ❌ Key resharing
 ❌ Participant removal
+❌ Ed25519 -> X25519 key conversion
 
 ## Security Considerations
 
@@ -343,6 +417,7 @@ module.exports = nextConfig;
 2. **Nonce Reuse:** Nonces must NEVER be reused - they are single-use
 3. **Side Channels:** WASM may be vulnerable to timing attacks
 4. **Memory Safety:** WASM provides sandboxing but secret data cleanup is important
+5. **Ed25519 to X25519:** Generate separate keys rather than converting
 
 ## Previous Grant Attempts
 
@@ -356,6 +431,7 @@ This implementation provides:
 - Working Ed25519 FROST (proof of concept)
 - Clear path to Zcash curves (swap frost-ed25519 for frost-rerandomized)
 - Fallback for development without WASM
+- Real production crypto for authentication and E2E encryption
 
 ## Next Steps
 

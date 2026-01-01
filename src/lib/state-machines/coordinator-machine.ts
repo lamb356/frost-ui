@@ -4,6 +4,35 @@
  * Manages the signing ceremony flow for the coordinator role.
  * States: idle → creatingSession → waitingForParticipants → collectingRound1 →
  *         sendingRound2 → collectingRound2 → aggregating → complete
+ *
+ * ## IMPORTANT: frostd Spec Compliance Notes
+ *
+ * The frostd specification (https://frost.zfnd.org/zcash/server.html) does NOT
+ * define these concepts that this state machine currently uses:
+ *
+ * 1. **inviteCode**: The frostd spec has no invite code concept. Sessions are
+ *    identified solely by session_id. Participants must know the session_id
+ *    and be included in the pubkeys list when the session is created.
+ *    TODO: Remove inviteCode and use session_id directly.
+ *
+ * 2. **PARTICIPANT_JOINED event**: The frostd server does not emit join events.
+ *    Instead, participant readiness is determined by:
+ *    - Calling /get_session_info to see the pubkeys list
+ *    - Receiving Round 1 commitment messages via /receive
+ *    When a participant sends their Round 1 commitment, they have effectively
+ *    "joined" the signing ceremony.
+ *
+ * 3. **Real-time participant tracking**: Since frostd uses polling (not WebSocket),
+ *    the coordinator must poll /receive to detect when participants have sent
+ *    their commitments. The session info shows configured pubkeys, not live status.
+ *
+ * ## How This Machine Should Work with Real frostd
+ *
+ * 1. Coordinator creates session via POST /create_new_session with pubkeys list
+ * 2. Coordinator shares session_id with participants out-of-band
+ * 3. Coordinator polls /receive (as_coordinator=true) for incoming messages
+ * 4. When a Round 1 commitment message arrives, that participant is "ready"
+ * 5. Once threshold commitments received → transition to collectingRound2
  */
 
 import { setup, assign, fromPromise } from 'xstate';
@@ -25,6 +54,12 @@ export interface CoordinatorContext {
   // Session info
   sessionId: SessionId | null;
   session: SessionInfo | null;
+  /**
+   * DEMO ONLY: The frostd spec does NOT have an invite code concept.
+   * Sessions are identified by session_id only. This field exists for
+   * UI convenience but should be removed when integrating with real frostd.
+   * Share session_id directly with participants instead.
+   */
   inviteCode: string | null;
 
   // Configuration
@@ -49,9 +84,23 @@ export interface CoordinatorContext {
   roundTimeout: number; // ms
 }
 
+/**
+ * Coordinator events.
+ *
+ * NOTE: PARTICIPANT_JOINED is NOT a frostd server event. The frostd server
+ * does not notify when participants join. Instead, this event should be
+ * derived from receiving Round 1 commitment messages via /receive polling.
+ * When a commitment message arrives from a pubkey, that participant has
+ * effectively "joined" the signing ceremony.
+ */
 export type CoordinatorEvent =
   | { type: 'START'; sessionName: string; threshold: number; maxParticipants: number }
   | { type: 'SESSION_CREATED'; session: SessionInfo; inviteCode: string }
+  /**
+   * DERIVED EVENT: Not from frostd. Fire this when a Round 1 commitment
+   * message is received via /receive polling. The participantId should be
+   * determined by matching the sender's pubkey to the session's pubkey list.
+   */
   | { type: 'PARTICIPANT_JOINED'; participantId: ParticipantId }
   | { type: 'PARTICIPANT_LEFT'; participantId: ParticipantId }
   | { type: 'START_SIGNING'; message: string; signerIds: ParticipantId[] }

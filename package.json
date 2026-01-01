@@ -9,6 +9,8 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "@noble/curves": "^2.0.1",
+    "@noble/ed25519": "^3.0.0",
     "@xstate/react": "^6.0.0",
     "next": "16.1.1",
     "react": "19.2.3",

@@ -4,6 +4,40 @@
  * Manages the signing ceremony flow for participants.
  * States: idle → joiningSession → waitingForRound1Start → sendingRound1 →
  *         waitingForRound2 → confirmingTransaction → sendingRound2 → complete
+ *
+ * ## IMPORTANT: frostd Spec Compliance Notes
+ *
+ * The frostd specification (https://frost.zfnd.org/zcash/server.html) does NOT
+ * define these concepts that this state machine currently uses:
+ *
+ * 1. **inviteCode**: The frostd spec has no invite code concept. Participants
+ *    must know the session_id directly (shared out-of-band by coordinator).
+ *    They must also be in the pubkeys list when the session was created.
+ *    TODO: Remove inviteCode and accept session_id directly.
+ *
+ * 2. **"Joining" a session**: There is no explicit join operation in frostd.
+ *    A participant is part of a session if their pubkey was included in the
+ *    pubkeys list when /create_new_session was called. The participant
+ *    "participates" by:
+ *    - Polling /receive to get messages from coordinator
+ *    - Sending Round 1 commitment via /send (recipients=[]) to coordinator
+ *    - Receiving all commitments and message to sign
+ *    - Sending Round 2 signature share via /send
+ *
+ * 3. **ROUND1_STARTED event**: The frostd server does not push events.
+ *    Participants must poll /receive to detect when the coordinator has
+ *    broadcast the message to sign. When they receive this message,
+ *    they generate and send their Round 1 commitment.
+ *
+ * ## How This Machine Should Work with Real frostd
+ *
+ * 1. Participant receives session_id from coordinator (out-of-band)
+ * 2. Participant polls /receive (as_coordinator=false) for incoming messages
+ * 3. When message-to-sign arrives → generate Round 1 commitment
+ * 4. Send commitment via /send with recipients=[] (to coordinator)
+ * 5. Poll /receive for collected commitments from coordinator
+ * 6. Generate Round 2 signature share and send via /send
+ * 7. Poll /receive for final aggregate signature
  */
 
 import { setup, assign, fromPromise } from 'xstate';
@@ -42,6 +76,13 @@ export interface ParticipantContext {
   sessionId: SessionId | null;
   session: SessionInfo | null;
   participantId: ParticipantId | null;
+  /**
+   * DEMO ONLY: The frostd spec does NOT have an invite code concept.
+   * Sessions are identified by session_id only. The coordinator shares
+   * the session_id out-of-band. Participants must have their pubkey
+   * in the session's pubkeys list to participate.
+   * TODO: Remove this field and use session_id directly.
+   */
   inviteCode: string | null;
 
   // Key material
@@ -69,9 +110,27 @@ export interface ParticipantContext {
   roundTimeout: number; // ms
 }
 
+/**
+ * Participant events.
+ *
+ * NOTE: Many of these events are derived from polling /receive, not pushed by frostd.
+ * - SESSION_JOINED: Derived locally after verifying our pubkey is in session info
+ * - ROUND1_STARTED: Derived when message-to-sign is received via /receive
+ * - COMMITMENTS_RECEIVED: Derived when all commitments are received via /receive
+ * - SIGNING_COMPLETE: Derived when aggregate signature is received via /receive
+ */
 export type ParticipantEvent =
+  /**
+   * JOIN uses inviteCode which is NOT in frostd spec. In production, this
+   * should accept only session_id. The participant verifies they're in the
+   * session by checking if their pubkey is in the session's pubkeys list.
+   */
   | { type: 'JOIN'; sessionId: SessionId; inviteCode: string; keyPackage: FrostKeyPackage }
   | { type: 'SESSION_JOINED'; session: SessionInfo; participantId: ParticipantId }
+  /**
+   * DERIVED EVENT: Fire this when message-to-sign is received via /receive polling.
+   * frostd does not push "round started" events - participants must poll.
+   */
   | { type: 'ROUND1_STARTED'; message: string }
   | { type: 'NONCES_GENERATED'; nonces: SigningNonces; commitment: SigningCommitment }
   | { type: 'COMMITMENT_SENT' }
