@@ -128,6 +128,56 @@ npm run lint
 npm run build
 ```
 
+## Testing with frostd
+
+To test the client against a real frostd server:
+
+### 1. Install frostd
+
+```bash
+cargo install frostd
+```
+
+### 2. Generate TLS Certificates
+
+frostd requires TLS. Use [mkcert](https://github.com/FiloSottile/mkcert) for local development:
+
+```bash
+# Install mkcert (macOS)
+brew install mkcert
+
+# Install mkcert (Linux)
+# See https://github.com/FiloSottile/mkcert#installation
+
+# Generate local CA and certs
+mkcert -install
+mkcert localhost
+```
+
+### 3. Run frostd
+
+```bash
+frostd --cert localhost.pem --key localhost-key.pem
+```
+
+Default port is 2743.
+
+### 4. Run Smoke Test
+
+```bash
+# Test against local frostd
+npx tsx scripts/test-frostd.ts
+
+# Or specify a custom URL
+npx tsx scripts/test-frostd.ts https://localhost:2743
+```
+
+The smoke test validates the complete authentication and session flow:
+- Challenge/response authentication with XEdDSA
+- Session creation, listing, and info retrieval
+- Message send/receive
+- Session cleanup
+
 ## Security Considerations
 
 - **Secret Key Storage**: Signing shares must never be logged or stored unencrypted
