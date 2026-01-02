@@ -6,9 +6,9 @@ This document describes the integration of real FROST cryptographic operations v
 
 | Component | Status | Notes |
 |-----------|--------|-------|
-| **Ed25519 Auth** | ✅ Production | Real @noble/ed25519 signing (see XEdDSA note below) |
+| **XEdDSA Auth** | ✅ Production | Spec-compliant XEdDSA signatures (Signal Protocol) |
 | **Challenge Signing** | ✅ Production | Signs UUID as 16-byte binary per spec |
-| **Ed25519 ↔ X25519** | ✅ Production | Real key conversion via @noble/curves |
+| **X25519 Key Generation** | ✅ Production | Single keypair for auth + encryption |
 | **X25519 E2E Encryption** | ✅ Production | Real ECDH + AES-GCM for message encryption |
 | **Password Key Storage** | ✅ Production | PBKDF2 + AES-GCM for local key encryption |
 | **FROST WASM (Ed25519)** | ⚠️ Demo Only | Works but wrong curve for Zcash |
@@ -22,11 +22,10 @@ This document describes the integration of real FROST cryptographic operations v
 
 These components use real cryptography and match the frostd specification:
 
-1. **Authentication Crypto** (`src/lib/crypto/index.ts`)
-   - Real Ed25519 key generation via @noble/ed25519
-   - Real Ed25519 signing for /login challenge
-   - Real Ed25519 ↔ X25519 key conversion via @noble/curves
-   - Unified keypair support (one key for auth + encryption)
+1. **Authentication Crypto** (`src/lib/crypto/index.ts`, `src/lib/crypto/xeddsa.ts`)
+   - XEdDSA signatures (spec-compliant with frostd)
+   - X25519 key generation (single keypair for auth + encryption)
+   - XEdDSA signing for /login challenge (UUID as 16-byte binary)
    - Real X25519 ECDH key exchange for E2E encryption
    - Real AES-256-GCM encryption with HKDF key derivation
    - Real PBKDF2 password-based key derivation
@@ -51,40 +50,45 @@ These components work but need changes for production:
    - Sessions are identified by session_id only
    - Participants join by knowing the session_id and being in the pubkeys list
 
-## XEdDSA vs Ed25519 Authentication
+## XEdDSA Authentication (Spec-Compliant)
 
-> **Known Limitation:** The frostd specification technically requires XEdDSA signatures, but this implementation uses standard Ed25519.
+This implementation uses **XEdDSA signatures** as required by the frostd specification. XEdDSA is from the Signal Protocol and allows using a single X25519 keypair for both ECDH encryption and digital signatures.
 
-### What This Means
+### How It Works
 
-| Aspect | Current (Ed25519) | Spec-Strict (XEdDSA) |
-|--------|-------------------|----------------------|
-| **Algorithm** | RFC 8032 Ed25519 | Signal XEdDSA |
-| **Key Usage** | Separate signing key | Same key for signing + ECDH |
-| **Compatibility** | Works with most frostd | Required for strict compliance |
-| **Implementation** | @noble/ed25519 | Would require custom implementation |
+| Step | Description |
+|------|-------------|
+| **Key Generation** | Generate X25519 keypair (32-byte private key) |
+| **Public Key Derivation** | Derive Ed25519 public key via XEdDSA (sign bit = 0) |
+| **Signing** | Convert X25519 → Ed25519 internally, sign with randomized nonce |
+| **Verification** | frostd verifies using the Ed25519 public key |
 
-### Why Ed25519 Works
-
-1. **Same Curve:** Ed25519 and X25519 are both Curve25519
-2. **Same Keys:** We properly convert Ed25519 → X25519 for encryption
-3. **Practical Compatibility:** Many frostd implementations accept Ed25519
-
-### XEdDSA Future Work
-
-If strict XEdDSA compliance is required:
+### Implementation Details
 
 ```typescript
-// Current: Ed25519 signature
-const signature = await ed.signAsync(messageBytes, privateKey);
+// Generate X25519 keypair for both auth and encryption
+const keys = generateAuthKeyPair();
+// keys.privateKey = X25519 private key (hex)
+// keys.publicKey = XEdDSA-derived Ed25519 public key (hex)
 
-// XEdDSA would require:
-// 1. Convert Ed25519 private key to X25519 format
-// 2. Use XEdDSA signing algorithm (different from Ed25519)
-// See: https://signal.org/docs/specifications/xeddsa/
+// Sign challenge with XEdDSA
+const signature = signChallenge(keys.privateKey, challengeUuid);
+// Internally: converts X25519 key to Ed25519, signs UUID as 16 bytes
 ```
 
-**Recommendation:** Test with your frostd server. If Ed25519 signatures are rejected, XEdDSA implementation would be needed.
+### XEdDSA vs Ed25519
+
+| Aspect | XEdDSA (Current) | Standard Ed25519 |
+|--------|------------------|------------------|
+| **Key Type** | X25519 private key | Ed25519 private key |
+| **Public Key** | Derived with sign bit 0 | Standard Ed25519 public key |
+| **Nonce** | Randomized (64 bytes) | Deterministic (RFC 8032) |
+| **Use Case** | Same key for ECDH + signing | Signing only |
+
+### References
+
+- [XEdDSA Specification (Signal)](https://signal.org/docs/specifications/xeddsa/)
+- [frostd Server Spec](https://frost.zfnd.org/zcash/server.html)
 
 ## Challenge Signing (UUID Binary Format)
 
@@ -465,10 +469,10 @@ module.exports = nextConfig;
 ✅ Signature verification
 ✅ TypeScript type safety
 ✅ Fallback to mock implementation
-✅ Real Ed25519 authentication
-✅ Real Ed25519 ↔ X25519 key conversion
+✅ XEdDSA authentication (spec-compliant with frostd)
+✅ X25519 key generation
 ✅ Real X25519 E2E encryption
-✅ Unified keypair (one key for auth + encryption)
+✅ Unified keypair (one X25519 key for auth + encryption)
 
 ## What Doesn't Work (Yet)
 
@@ -476,15 +480,14 @@ module.exports = nextConfig;
 ❌ Zcash-specific curves (frost-rerandomized)
 ❌ Key resharing
 ❌ Participant removal
-❌ XEdDSA signatures (using Ed25519 instead - see note above)
 
 ## Security Considerations
 
 1. **Secret Key Storage:** Signing shares must be encrypted at rest
-2. **Nonce Reuse:** Nonces must NEVER be reused - they are single-use
+2. **Nonce Reuse:** XEdDSA uses randomized nonces (64 bytes per signature)
 3. **Side Channels:** WASM may be vulnerable to timing attacks
 4. **Memory Safety:** WASM provides sandboxing but secret data cleanup is important
-5. **Ed25519 to X25519:** Generate separate keys rather than converting
+5. **Key Reuse:** XEdDSA allows safe reuse of X25519 keys for both ECDH and signing
 
 ## Previous Grant Attempts
 
@@ -498,7 +501,9 @@ This implementation provides:
 - Working Ed25519 FROST (proof of concept)
 - Clear path to Zcash curves (swap frost-ed25519 for frost-rerandomized)
 - Fallback for development without WASM
-- Real production crypto for authentication and E2E encryption
+- Spec-compliant XEdDSA authentication for frostd
+- Real X25519 ECDH for E2E encryption
+- Unified keypair (single identity for auth + encryption)
 
 ## Next Steps
 

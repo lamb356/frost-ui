@@ -2,42 +2,37 @@
  * Crypto Utilities for FROST Multi-Sig UI
  *
  * PRODUCTION-READY: This module provides real cryptographic operations using
- * the @noble/ed25519 and @noble/curves libraries.
+ * the @noble/ed25519, @noble/curves, and @noble/hashes libraries.
  *
  * Features:
- * - Ed25519 key generation and signing (for frostd authentication)
- * - Ed25519 to X25519 key conversion (single keypair for auth + encryption)
+ * - XEdDSA signatures for frostd authentication (spec-compliant)
+ * - X25519 key generation (single keypair for auth + encryption)
  * - X25519 ECDH key exchange with AES-GCM encryption (for E2E messaging)
  * - Password-based key encryption for local storage
  *
- * ## IMPORTANT: XEdDSA vs Ed25519 Signature Scheme
+ * ## XEdDSA Authentication (Spec-Compliant)
  *
- * The frostd specification technically requires XEdDSA signatures, which allow
- * using the same key for both Ed25519 signing AND X25519 encryption. However:
+ * This implementation uses XEdDSA signatures as required by the frostd spec:
+ * https://frost.zfnd.org/zcash/server.html
  *
- * **Current Implementation:** Standard Ed25519 signatures (RFC 8032)
- * - Uses @noble/ed25519 for signing
- * - May work with frostd implementations that accept Ed25519
- * - Provides proper Ed25519 -> X25519 key conversion for encryption
+ * XEdDSA allows using the same X25519 keypair for both:
+ * - ECDH key exchange (encryption)
+ * - Digital signatures (authentication)
  *
- * **Spec-Strict (XEdDSA):** Would require:
- * - Converting Ed25519 private key to X25519 format
- * - Signing with the X25519-derived key using XEdDSA algorithm
- * - See: https://signal.org/docs/specifications/xeddsa/
+ * The XEdDSA algorithm (from Signal Protocol) converts X25519 keys to Ed25519
+ * format for signing while maintaining a consistent identity.
  *
- * **Recommendation:** Test with your frostd server. Most implementations
- * accept standard Ed25519 signatures. XEdDSA is documented as future work
- * if strict spec compliance is required.
- *
- * See: https://frost.zfnd.org/zcash/server.html
+ * See: https://signal.org/docs/specifications/xeddsa/
  */
 
 import * as ed from '@noble/ed25519';
 import { ed25519, x25519 } from '@noble/curves/ed25519.js';
+import { xeddsaSign, xeddsaVerify, xeddsaGetPublicKey } from './xeddsa';
 
-// We use both:
-// - @noble/ed25519 for signAsync/verifyAsync (async-friendly)
-// - @noble/curves/ed25519 for ed25519.utils.toMontgomery (key conversion)
+// We use:
+// - @noble/ed25519 for Ed25519 operations (legacy/fallback)
+// - @noble/curves/ed25519 for key conversion utilities
+// - ./xeddsa for XEdDSA signing (frostd spec-compliant)
 
 // =============================================================================
 // Types
@@ -165,24 +160,28 @@ function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
 }
 
 // =============================================================================
-// Ed25519 Key Generation (PRODUCTION-READY)
+// Key Generation (PRODUCTION-READY, XEdDSA-Compatible)
 // =============================================================================
 
 /**
- * Generate an Ed25519 key pair for frostd authentication.
+ * Generate a key pair for frostd authentication.
  *
- * Uses @noble/ed25519 for cryptographically secure key generation.
- * The private key is 32 random bytes, and the public key is derived
- * from it using Ed25519 scalar multiplication.
+ * This generates an X25519 keypair that can be used for:
+ * - XEdDSA signing (authentication) - spec-compliant with frostd
+ * - X25519 ECDH (encryption) - for E2E message encryption
  *
- * @returns Ed25519 key pair with hex-encoded keys
+ * The public key returned is the XEdDSA-derived Ed25519 public key
+ * (with sign bit 0), which is what frostd expects for verification.
+ *
+ * @returns Key pair with X25519 private key and XEdDSA public key (hex-encoded)
  */
-export async function generateAuthKeyPair(): Promise<Ed25519KeyPair> {
-  // Generate 32 random bytes for the private key seed
-  const privateKey = ed.utils.randomSecretKey();
+export function generateAuthKeyPair(): Ed25519KeyPair {
+  // Generate X25519 private key (32 random bytes with clamping)
+  const privateKey = x25519.utils.randomSecretKey();
 
-  // Derive the public key from the private key
-  const publicKey = await ed.getPublicKeyAsync(privateKey);
+  // Derive the XEdDSA public key (Ed25519 format with sign bit 0)
+  // This is the public key frostd will use to verify signatures
+  const publicKey = xeddsaGetPublicKey(privateKey);
 
   return {
     publicKey: bytesToHex(publicKey),
@@ -191,33 +190,50 @@ export async function generateAuthKeyPair(): Promise<Ed25519KeyPair> {
 }
 
 // =============================================================================
-// Ed25519 Signing (PRODUCTION-READY)
+// XEdDSA Signing (PRODUCTION-READY, SPEC-COMPLIANT)
 // =============================================================================
 
 /**
- * Sign a challenge for frostd authentication using Ed25519.
+ * Sign a challenge for frostd authentication using XEdDSA.
  *
- * Per the frostd spec, the challenge is a UUID that must be signed as its
- * 16-byte binary representation (NOT as a UTF-8 string). The UUID is converted
- * from its string form (e.g., "550e8400-e29b-41d4-a716-446655440000") to
- * 16 bytes by stripping hyphens and parsing as hex.
+ * This is the SPEC-COMPLIANT implementation for frostd authentication.
+ * XEdDSA allows signing with an X25519 private key by converting it to
+ * Ed25519 format internally.
  *
- * NOTE: The frostd spec technically requires XEdDSA signatures, but this
- * implementation uses standard Ed25519. See module header for details.
+ * Per the frostd spec:
+ * - The challenge is a UUID signed as its 16-byte binary representation
+ * - The signature scheme is XEdDSA (not standard Ed25519)
+ * - This allows using the same keypair for both ECDH and signing
  *
- * @param privateKeyHex - Ed25519 private key (32 bytes, hex-encoded)
+ * @param x25519PrivateKeyHex - X25519 private key (32 bytes, hex-encoded)
  * @param challenge - UUID challenge string from /challenge endpoint
- * @returns Hex-encoded Ed25519 signature (64 bytes)
+ * @returns Hex-encoded XEdDSA signature (64 bytes)
  */
-export async function signChallenge(
-  privateKeyHex: string,
+export function signChallenge(
+  x25519PrivateKeyHex: string,
   challenge: string
-): Promise<string> {
-  const privateKey = hexToBytes(privateKeyHex);
-  // Sign the UUID as 16-byte binary (spec-compliant), not UTF-8 string
+): string {
+  const privateKey = hexToBytes(x25519PrivateKeyHex);
+  // Sign the UUID as 16-byte binary (spec-compliant)
   const challengeBytes = uuidToBytes(challenge);
-  const signature = await ed.signAsync(challengeBytes, privateKey);
+  // Use XEdDSA signing (converts X25519 key to Ed25519 internally)
+  const signature = xeddsaSign(privateKey, challengeBytes);
   return bytesToHex(signature);
+}
+
+/**
+ * Get the Ed25519 public key for XEdDSA verification from an X25519 private key.
+ *
+ * This returns the public key that frostd will use to verify XEdDSA signatures.
+ * It's derived from the X25519 private key with sign bit normalization.
+ *
+ * @param x25519PrivateKeyHex - X25519 private key (32 bytes, hex-encoded)
+ * @returns Hex-encoded Ed25519 public key (32 bytes)
+ */
+export function getXEdDSAPublicKey(x25519PrivateKeyHex: string): string {
+  const privateKey = hexToBytes(x25519PrivateKeyHex);
+  const publicKey = xeddsaGetPublicKey(privateKey);
+  return bytesToHex(publicKey);
 }
 
 /**
@@ -249,23 +265,23 @@ export async function verifySignature(
 }
 
 /**
- * Verify an Ed25519 signature on a UUID challenge.
+ * Verify an XEdDSA signature on a UUID challenge.
  *
- * This is the counterpart to signChallenge - it verifies a signature
+ * This is the counterpart to signChallenge - it verifies an XEdDSA signature
  * where the message was the 16-byte binary form of a UUID.
  *
- * @param publicKeyHex - Ed25519 public key (32 bytes, hex-encoded)
+ * @param x25519PublicKeyHex - X25519 public key (32 bytes, hex-encoded)
  * @param challenge - The UUID challenge that was signed
- * @param signatureHex - Ed25519 signature (64 bytes, hex-encoded)
+ * @param signatureHex - XEdDSA signature (64 bytes, hex-encoded)
  * @returns true if signature is valid
  */
-export async function verifyChallengeSignature(
-  publicKeyHex: string,
+export function verifyChallengeSignature(
+  x25519PublicKeyHex: string,
   challenge: string,
   signatureHex: string
-): Promise<boolean> {
+): boolean {
   try {
-    const publicKey = hexToBytes(publicKeyHex);
+    const publicKey = hexToBytes(x25519PublicKeyHex);
     // Use UUID binary format (same as signChallenge)
     const challengeBytes = uuidToBytes(challenge);
     const signature = hexToBytes(signatureHex);
@@ -274,7 +290,7 @@ export async function verifyChallengeSignature(
     if (publicKey.length !== 32) return false;
     if (signature.length !== 64) return false;
 
-    return await ed.verifyAsync(signature, challengeBytes, publicKey);
+    return xeddsaVerify(publicKey, challengeBytes, signature);
   } catch {
     return false;
   }
@@ -494,29 +510,42 @@ export function ed25519ToX25519PrivateKey(ed25519PrivkeyHex: string): string {
 }
 
 /**
- * Generate a unified keypair that works for both Ed25519 signing and X25519 encryption.
+ * Generate a unified keypair for both XEdDSA signing and X25519 encryption.
  *
- * This generates an Ed25519 keypair and also computes the corresponding X25519 keys,
+ * This generates an X25519 keypair and derives the XEdDSA public key,
  * allowing a single identity to be used for both authentication and E2E encryption.
  *
- * @returns Object with Ed25519 keys (for signing) and X25519 keys (for encryption)
+ * With XEdDSA, a single X25519 private key is used for:
+ * - XEdDSA signing (frostd authentication)
+ * - X25519 ECDH (E2E encryption)
+ *
+ * @returns Object with auth keys (for XEdDSA) and X25519 keys (for encryption)
  */
-export async function generateUnifiedKeyPair(): Promise<{
-  ed25519: Ed25519KeyPair;
+export function generateUnifiedKeyPair(): {
+  /** Auth keys: X25519 private key + XEdDSA-derived public key */
+  auth: Ed25519KeyPair;
+  /** X25519 keys for ECDH encryption */
   x25519: X25519KeyPair;
-}> {
-  // Generate Ed25519 keypair
-  const ed25519Keys = await generateAuthKeyPair();
+} {
+  // Generate X25519 keypair (the base for everything)
+  const x25519PrivateKey = x25519.utils.randomSecretKey();
+  const x25519PublicKey = x25519.getPublicKey(x25519PrivateKey);
 
-  // Convert to X25519 for encryption
-  const x25519PubKey = ed25519ToX25519PublicKey(ed25519Keys.publicKey);
-  const x25519PrivKey = ed25519ToX25519PrivateKey(ed25519Keys.privateKey);
+  // Derive XEdDSA public key (Ed25519 format for frostd)
+  const xeddsaPublicKey = xeddsaGetPublicKey(x25519PrivateKey);
 
   return {
-    ed25519: ed25519Keys,
+    auth: {
+      // XEdDSA public key (Ed25519 format) - what frostd uses for verification
+      publicKey: bytesToHex(xeddsaPublicKey),
+      // X25519 private key - used for XEdDSA signing
+      privateKey: bytesToHex(x25519PrivateKey),
+    },
     x25519: {
-      publicKey: x25519PubKey,
-      privateKey: x25519PrivKey,
+      // X25519 public key - for ECDH encryption
+      publicKey: bytesToHex(x25519PublicKey),
+      // Same X25519 private key - for ECDH decryption
+      privateKey: bytesToHex(x25519PrivateKey),
     },
   };
 }

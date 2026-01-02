@@ -117,8 +117,8 @@ export function useAuth(options: UseAuthOptions = {}): UseAuthResult {
       // Get new challenge (no pubkey required per spec)
       const { challenge } = await clientRef.current.getChallenge();
 
-      // Sign the challenge
-      const signature = await signChallenge(privateKeyRef.current, challenge);
+      // Sign the challenge using XEdDSA
+      const signature = signChallenge(privateKeyRef.current, challenge);
 
       // Login with signed challenge (challenge, pubkey, signature per spec)
       const response = await clientRef.current.login(challenge, pubkey, signature);
@@ -157,8 +157,8 @@ export function useAuth(options: UseAuthOptions = {}): UseAuthResult {
       // Get challenge from server (no pubkey required per spec)
       const { challenge } = await clientRef.current.getChallenge();
 
-      // Sign the challenge
-      const signature = await signChallenge(keys.privateKey, challenge);
+      // Sign the challenge using XEdDSA
+      const signature = signChallenge(keys.privateKey, challenge);
 
       // Login with signed challenge (challenge, pubkey, signature per spec)
       const response = await clientRef.current.login(
