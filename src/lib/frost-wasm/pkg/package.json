@@ -1,0 +1,17 @@
+{
+  "name": "frost-wasm",
+  "type": "module",
+  "description": "WASM bindings for FROST threshold signatures",
+  "version": "0.1.0",
+  "license": "MIT OR Apache-2.0",
+  "files": [
+    "frost_wasm_bg.wasm",
+    "frost_wasm.js",
+    "frost_wasm.d.ts"
+  ],
+  "main": "frost_wasm.js",
+  "types": "frost_wasm.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}
