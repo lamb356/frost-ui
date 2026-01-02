@@ -228,9 +228,7 @@ fn generate_key_shares_internal(threshold: u16, total: u16) -> Result<KeyGenResu
         let key_package_json =
             serde_json::to_string(&key_package).map_err(|e| format!("Serialize error: {}", e))?;
 
-        let id_bytes = id
-            .serialize()
-            .map_err(|e| format!("Failed to serialize identifier: {:?}", e))?;
+        let id_bytes = id.serialize();
         let id_num = u16::from_le_bytes([id_bytes[0], id_bytes[1]]);
 
         key_shares.push(KeyShareInfo {
@@ -283,9 +281,7 @@ fn generate_round1_internal(key_package_json: &str) -> Result<Round1Result, Stri
 
     // Get identifier
     let identifier = *key_package.identifier();
-    let id_bytes = identifier
-        .serialize()
-        .map_err(|e| format!("Failed to serialize identifier: {:?}", e))?;
+    let id_bytes = identifier.serialize();
     let id_num = u16::from_le_bytes([id_bytes[0], id_bytes[1]]);
 
     // Generate nonces and commitments
@@ -463,9 +459,7 @@ fn generate_round2_internal(
 
     // Get identifier
     let id = *key_package.identifier();
-    let id_bytes = id
-        .serialize()
-        .map_err(|e| format!("Failed to serialize identifier: {:?}", e))?;
+    let id_bytes = id.serialize();
     let id_num = u16::from_le_bytes([id_bytes[0], id_bytes[1]]);
 
     Ok(SignatureShareInfo {
@@ -682,9 +676,7 @@ fn get_public_key_internal(key_package_json: &str) -> Result<PublicKeyResult, St
     let pubkey_hex = hex::encode(pubkey_bytes);
 
     let id = *key_package.identifier();
-    let id_bytes = id
-        .serialize()
-        .map_err(|e| format!("Failed to serialize identifier: {:?}", e))?;
+    let id_bytes = id.serialize();
     let id_num = u16::from_le_bytes([id_bytes[0], id_bytes[1]]);
 
     Ok(PublicKeyResult {

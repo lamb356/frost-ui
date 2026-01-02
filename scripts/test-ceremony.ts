@@ -97,7 +97,7 @@ async function encryptMessage(
 
   // Encrypt with AES-GCM
   const nonce = crypto.randomBytes(12);
-  const cipher = crypto.createCipheriv('aes-256-gcm', aesKey, nonce);
+  const cipher = crypto.createCipheriv('aes-256-gcm', Buffer.from(aesKey), nonce);
   const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final(), cipher.getAuthTag()]);
 
   return {
@@ -147,7 +147,7 @@ async function decryptMessage(
   // Decrypt (ciphertext includes auth tag at end)
   const authTag = ciphertext.slice(-16);
   const encryptedData = ciphertext.slice(0, -16);
-  const decipher = crypto.createDecipheriv('aes-256-gcm', aesKey, nonce);
+  const decipher = crypto.createDecipheriv('aes-256-gcm', Buffer.from(aesKey), nonce);
   decipher.setAuthTag(authTag);
   const plaintext = Buffer.concat([decipher.update(encryptedData), decipher.final()]);
 
