@@ -11,6 +11,11 @@
  * - No non-spec concepts (inviteCode, etc.)
  */
 
+import type { BackendId } from '../lib/frost-backend/types';
+
+// Re-export for convenience
+export type { BackendId };
+
 // =============================================================================
 // Message Envelope (all messages use this format)
 // =============================================================================
@@ -62,6 +67,8 @@ export type MessageType =
  * Sent by coordinator to start a signing ceremony.
  */
 export interface SigningPackagePayload {
+  /** FROST backend to use ('ed25519' | 'orchard-redpallas') */
+  backendId: BackendId;
   /** Message to be signed (hex-encoded) */
   message: string;
   /** Participant identifiers selected for this signing round */
@@ -218,10 +225,12 @@ export function createMessage<T extends MessageType>(
 export function createSigningPackage(
   sessionId: string,
   fromPubkey: string,
+  backendId: BackendId,
   message: string,
   signerIds: number[]
 ): MessageEnvelope<SigningPackagePayload> {
   return createMessage('SIGNING_PACKAGE', sessionId, fromPubkey, {
+    backendId,
     message,
     signerIds,
     coordinatorPubkey: fromPubkey,
