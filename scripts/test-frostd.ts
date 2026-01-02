@@ -7,12 +7,15 @@
  * Usage:
  *   npx tsx scripts/test-frostd.ts [server-url]
  *
- * Default server: http://localhost:2743
+ * Default server: https://localhost:2743
  */
+
+// Disable TLS certificate validation for self-signed certs
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 
 // Use dynamic import for ESM modules
 async function main() {
-  const SERVER_URL = process.argv[2] || 'http://localhost:2743';
+  const SERVER_URL = process.argv[2] || 'https://localhost:2743';
 
   console.log('');
   console.log('='.repeat(60));

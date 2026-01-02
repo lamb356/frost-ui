@@ -72,6 +72,10 @@ function calculateKeyPair(x25519PrivateKey: Uint8Array): XEdDSAKeyPair {
   k = k & ~(BigInt(1) << BigInt(255)); // Clear bit 255
   k = k | (BigInt(1) << BigInt(254)); // Set bit 254
 
+  // Reduce k mod curve order before multiplication
+  // The multiply function expects 1 <= scalar < n
+  k = mod(k, CURVE_ORDER);
+
   // Compute E = k * B (scalar multiplication on Ed25519 curve)
   const E = ed25519.Point.BASE.multiply(k);
 

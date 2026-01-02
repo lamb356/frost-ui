@@ -170,18 +170,18 @@ function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
  * - XEdDSA signing (authentication) - spec-compliant with frostd
  * - X25519 ECDH (encryption) - for E2E message encryption
  *
- * The public key returned is the XEdDSA-derived Ed25519 public key
- * (with sign bit 0), which is what frostd expects for verification.
+ * The public key returned is the X25519 public key (u-coordinate).
+ * frostd internally derives the Ed25519 equivalent for XEdDSA verification.
  *
- * @returns Key pair with X25519 private key and XEdDSA public key (hex-encoded)
+ * @returns Key pair with X25519 private and public keys (hex-encoded)
  */
 export function generateAuthKeyPair(): Ed25519KeyPair {
   // Generate X25519 private key (32 random bytes with clamping)
   const privateKey = x25519.utils.randomSecretKey();
 
-  // Derive the XEdDSA public key (Ed25519 format with sign bit 0)
-  // This is the public key frostd will use to verify signatures
-  const publicKey = xeddsaGetPublicKey(privateKey);
+  // Get the X25519 public key (u-coordinate)
+  // frostd expects this format and internally converts for XEdDSA verification
+  const publicKey = x25519.getPublicKey(privateKey);
 
   return {
     publicKey: bytesToHex(publicKey),
@@ -200,8 +200,8 @@ export function generateAuthKeyPair(): Ed25519KeyPair {
  * XEdDSA allows signing with an X25519 private key by converting it to
  * Ed25519 format internally.
  *
- * Per the frostd spec:
- * - The challenge is a UUID signed as its 16-byte binary representation
+ * Per the frostd implementation (integration_tests.rs):
+ * - The challenge is signed as UTF-8 bytes (challenge.as_bytes())
  * - The signature scheme is XEdDSA (not standard Ed25519)
  * - This allows using the same keypair for both ECDH and signing
  *
@@ -214,10 +214,20 @@ export function signChallenge(
   challenge: string
 ): string {
   const privateKey = hexToBytes(x25519PrivateKeyHex);
-  // Sign the UUID as 16-byte binary (spec-compliant)
-  const challengeBytes = uuidToBytes(challenge);
+  // Sign the challenge as UTF-8 bytes (matches frostd integration tests)
+  const challengeBytes = new TextEncoder().encode(challenge);
   // Use XEdDSA signing (converts X25519 key to Ed25519 internally)
   const signature = xeddsaSign(privateKey, challengeBytes);
+
+  // Debug: log the values for troubleshooting
+  if (typeof process !== 'undefined' && process.env.DEBUG) {
+    console.log('XEdDSA Debug:');
+    console.log('  Private key:', x25519PrivateKeyHex);
+    console.log('  Challenge:', challenge);
+    console.log('  Challenge bytes:', bytesToHex(challengeBytes));
+    console.log('  Signature:', bytesToHex(signature));
+  }
+
   return bytesToHex(signature);
 }
 
