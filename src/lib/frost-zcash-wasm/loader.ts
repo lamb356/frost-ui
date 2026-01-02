@@ -74,10 +74,12 @@ export interface Round1Result {
 }
 
 /**
- * Randomizer result
+ * Result of creating a signing package with randomizer
  */
-export interface RandomizerResult {
-  /** Randomizer (JSON serialized) */
+export interface SigningPackageResult {
+  /** Serialized SigningPackage (JSON) */
+  signing_package: string;
+  /** Serialized randomizer (JSON) - needed for signing and verification */
   randomizer: string;
 }
 
@@ -124,18 +126,20 @@ interface FrostZcashWasm {
   init(): void;
   generate_key_shares(threshold: number, total: number): string;
   generate_round1_commitment(key_package_json: string): string;
-  generate_randomizer(): string;
+  create_signing_package(
+    commitments_json: string,
+    message_hex: string,
+    public_key_package_json: string
+  ): string;
   generate_round2_signature(
     key_package_json: string,
     nonces_json: string,
-    commitments_json: string,
-    message_hex: string,
+    signing_package_json: string,
     randomizer_json: string
   ): string;
   aggregate_signature(
     shares_json: string,
-    commitments_json: string,
-    message_hex: string,
+    signing_package_json: string,
     public_key_package_json: string,
     randomizer_json: string
   ): string;
@@ -162,15 +166,15 @@ let wasmModule: FrostZcashWasm | null = null;
 export async function initFrostZcash(): Promise<void> {
   if (wasmModule) return;
 
-  const module = await import('./pkg/frost_zcash_wasm.js');
+  const frostMod = await import('./pkg/frost_zcash_wasm.js');
 
   // For web builds, we may need to call default() to initialize
-  if (typeof module.default === 'function') {
-    await module.default();
+  if (typeof frostMod.default === 'function') {
+    await frostMod.default();
   }
 
-  module.init();
-  wasmModule = module as unknown as FrostZcashWasm;
+  frostMod.init();
+  wasmModule = frostMod as unknown as FrostZcashWasm;
 }
 
 /**
@@ -223,16 +227,26 @@ export function generateRound1Commitment(keyPackageJson: string): Round1Result {
 }
 
 /**
- * Generate a randomizer for rerandomized signing
+ * Create a signing package with randomizer
  *
- * This should be called by the coordinator and distributed to all signers
- * via a secure channel before Round 2.
+ * This should be called by the coordinator after collecting all commitments.
+ * The randomizer is generated from the signing package and must be distributed
+ * to all signers via a secure channel.
  *
- * @returns Randomizer (JSON serialized)
+ * @param commitmentsJson All commitments (JSON array of CommitmentInfo)
+ * @param messageHex Message to sign (hex-encoded)
+ * @param publicKeyPackageJson Public key package (from KeyGenResult)
+ * @returns Signing package and randomizer
  */
-export function generateRandomizer(): RandomizerResult {
+export function createSigningPackage(
+  commitmentsJson: string,
+  messageHex: string,
+  publicKeyPackageJson: string
+): SigningPackageResult {
   const wasm = getWasm();
-  return parseResult<RandomizerResult>(wasm.generate_randomizer());
+  return parseResult<SigningPackageResult>(
+    wasm.create_signing_package(commitmentsJson, messageHex, publicKeyPackageJson)
+  );
 }
 
 /**
@@ -240,27 +254,19 @@ export function generateRandomizer(): RandomizerResult {
  *
  * @param keyPackageJson Participant's key package
  * @param noncesJson Nonces from Round 1 (must be JSON.stringify'd NoncesInfo)
- * @param commitmentsJson All commitments (JSON array of CommitmentInfo)
- * @param messageHex Message to sign (hex-encoded)
+ * @param signingPackageJson Signing package from coordinator (JSON)
  * @param randomizerJson Randomizer from coordinator (JSON)
  * @returns Signature share
  */
 export function generateRound2Signature(
   keyPackageJson: string,
   noncesJson: string,
-  commitmentsJson: string,
-  messageHex: string,
+  signingPackageJson: string,
   randomizerJson: string
 ): SignatureShareInfo {
   const wasm = getWasm();
   return parseResult<SignatureShareInfo>(
-    wasm.generate_round2_signature(
-      keyPackageJson,
-      noncesJson,
-      commitmentsJson,
-      messageHex,
-      randomizerJson
-    )
+    wasm.generate_round2_signature(keyPackageJson, noncesJson, signingPackageJson, randomizerJson)
   );
 }
 
@@ -268,28 +274,20 @@ export function generateRound2Signature(
  * Aggregate signature shares into final signature
  *
  * @param sharesJson All signature shares (JSON array of SignatureShareInfo)
- * @param commitmentsJson All commitments (JSON array of CommitmentInfo)
- * @param messageHex Message that was signed (hex)
+ * @param signingPackageJson Signing package (JSON)
  * @param publicKeyPackageJson Public key package (from KeyGenResult)
  * @param randomizerJson Randomizer used for signing (JSON)
  * @returns Aggregate signature
  */
 export function aggregateSignature(
   sharesJson: string,
-  commitmentsJson: string,
-  messageHex: string,
+  signingPackageJson: string,
   publicKeyPackageJson: string,
   randomizerJson: string
 ): AggregateResult {
   const wasm = getWasm();
   return parseResult<AggregateResult>(
-    wasm.aggregate_signature(
-      sharesJson,
-      commitmentsJson,
-      messageHex,
-      publicKeyPackageJson,
-      randomizerJson
-    )
+    wasm.aggregate_signature(sharesJson, signingPackageJson, publicKeyPackageJson, randomizerJson)
   );
 }
 

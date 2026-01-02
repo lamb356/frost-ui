@@ -141,6 +141,7 @@ async function main() {
 
   // Step 1: Generate keypair
   console.log('\n--- Step 1: Generate X25519 Keypair ---');
+  let privateKey: string;
   try {
     const keys = generateAuthKeyPair();
     pubkey = keys.publicKey;
@@ -148,7 +149,7 @@ async function main() {
     console.log(`         pubkey length: ${pubkey.length} hex chars = ${pubkey.length / 2} bytes`);
 
     // Store private key for signing
-    var privateKey = keys.privateKey;
+    privateKey = keys.privateKey;
     console.log(`         privateKey length: ${privateKey.length} hex chars = ${privateKey.length / 2} bytes`);
   } catch (e) {
     fail('Generate keypair', String(e));

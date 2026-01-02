@@ -46,7 +46,8 @@ interface Round1Result {
   nonces: NoncesInfo;
 }
 
-interface RandomizerResult {
+interface SigningPackageResult {
+  signing_package: string;
   randomizer: string;
 }
 
@@ -192,48 +193,40 @@ async function main() {
   }
 
   // ==========================================================================
-  // STEP 3: Generate Randomizer
+  // STEP 3: Create Signing Package with Randomizer
   // ==========================================================================
   console.log('\n' + '─'.repeat(70));
-  console.log('STEP 3: Generate Randomizer (ZIP-312)');
-  console.log('─'.repeat(70));
-
-  let randomizer: string;
-  try {
-    const result = parseResult<RandomizerResult>(frost.generate_randomizer());
-    randomizer = result.randomizer;
-    pass('Generated randomizer');
-    log(`Randomizer: ${randomizer.slice(0, 50)}...`);
-  } catch (e) {
-    fail('Generate randomizer', String(e));
-    process.exit(1);
-  }
-
-  // ==========================================================================
-  // STEP 4: Collect Commitments
-  // ==========================================================================
-  console.log('\n' + '─'.repeat(70));
-  console.log('STEP 4: Collect Commitments');
+  console.log('STEP 3: Create Signing Package with Randomizer (ZIP-312)');
   console.log('─'.repeat(70));
 
   const commitments: CommitmentInfo[] = round1Results.map((r) => r.commitment);
   const commitmentsJson = JSON.stringify(commitments);
-
-  pass('Collected commitments from all signers');
-  log(`Commitments: ${commitments.map((c) => c.identifier).join(', ')}`);
-
-  // ==========================================================================
-  // STEP 5: Round 2 - Generate Signature Shares
-  // ==========================================================================
-  console.log('\n' + '─'.repeat(70));
-  console.log('STEP 5: Round 2 - Generate Signature Shares');
-  console.log('─'.repeat(70));
 
   // Message to sign (hex-encoded)
   const messageHex = bytesToHex(
     crypto.createHash('sha256').update('Zcash Orchard Test Transaction').digest()
   );
   log(`Message hash: ${messageHex.slice(0, 32)}...`);
+
+  let signingPackage: SigningPackageResult;
+  try {
+    signingPackage = parseResult<SigningPackageResult>(
+      frost.create_signing_package(commitmentsJson, messageHex, keygen.public_key_package)
+    );
+    pass('Created signing package with randomizer');
+    log(`Commitments: ${commitments.map((c) => c.identifier).join(', ')}`);
+    log(`Randomizer: ${signingPackage.randomizer.slice(0, 50)}...`);
+  } catch (e) {
+    fail('Create signing package', String(e));
+    process.exit(1);
+  }
+
+  // ==========================================================================
+  // STEP 4: Round 2 - Generate Signature Shares
+  // ==========================================================================
+  console.log('\n' + '─'.repeat(70));
+  console.log('STEP 4: Round 2 - Generate Signature Shares');
+  console.log('─'.repeat(70));
 
   const signatureShares: SignatureShareInfo[] = [];
 
@@ -246,9 +239,8 @@ async function main() {
         frost.generate_round2_signature(
           signer.key_package,
           JSON.stringify(round1.nonces),
-          commitmentsJson,
-          messageHex,
-          randomizer
+          signingPackage.signing_package,
+          signingPackage.randomizer
         )
       );
       signatureShares.push(share);
@@ -264,10 +256,10 @@ async function main() {
   }
 
   // ==========================================================================
-  // STEP 6: Aggregate Signature
+  // STEP 5: Aggregate Signature
   // ==========================================================================
   console.log('\n' + '─'.repeat(70));
-  console.log('STEP 6: Aggregate Signature');
+  console.log('STEP 5: Aggregate Signature');
   console.log('─'.repeat(70));
 
   let aggregateResult: AggregateResult;
@@ -275,10 +267,9 @@ async function main() {
     aggregateResult = parseResult<AggregateResult>(
       frost.aggregate_signature(
         JSON.stringify(signatureShares),
-        commitmentsJson,
-        messageHex,
+        signingPackage.signing_package,
         keygen.public_key_package,
-        randomizer
+        signingPackage.randomizer
       )
     );
     pass('Aggregated signature');
@@ -289,10 +280,10 @@ async function main() {
   }
 
   // ==========================================================================
-  // STEP 7: Verify Signature
+  // STEP 6: Verify Signature
   // ==========================================================================
   console.log('\n' + '─'.repeat(70));
-  console.log('STEP 7: Verify Signature');
+  console.log('STEP 6: Verify Signature');
   console.log('─'.repeat(70));
 
   try {
@@ -301,7 +292,7 @@ async function main() {
         aggregateResult.signature,
         messageHex,
         keygen.group_public_key,
-        randomizer
+        signingPackage.randomizer
       )
     );
 
@@ -315,16 +306,13 @@ async function main() {
   }
 
   // ==========================================================================
-  // STEP 8: Test Randomization (Different randomizer = different signature)
+  // STEP 7: Test Randomization (Different randomizer = different signature)
   // ==========================================================================
   console.log('\n' + '─'.repeat(70));
-  console.log('STEP 8: Test Randomization');
+  console.log('STEP 7: Test Randomization');
   console.log('─'.repeat(70));
 
   try {
-    // Generate new randomizer
-    const newRandomizer = parseResult<RandomizerResult>(frost.generate_randomizer()).randomizer;
-
     // New round 1 commitments (must use fresh nonces!)
     const newRound1Results: Round1Result[] = [];
     for (const signer of signers) {
@@ -337,29 +325,32 @@ async function main() {
     const newCommitments = newRound1Results.map((r) => r.commitment);
     const newCommitmentsJson = JSON.stringify(newCommitments);
 
-    // Generate signature shares with new randomizer
+    // Create new signing package with new randomizer
+    const newSigningPackage = parseResult<SigningPackageResult>(
+      frost.create_signing_package(newCommitmentsJson, messageHex, keygen.public_key_package)
+    );
+
+    // Generate signature shares with new signing package
     const newShares: SignatureShareInfo[] = [];
     for (let i = 0; i < signers.length; i++) {
       const share = parseResult<SignatureShareInfo>(
         frost.generate_round2_signature(
           signers[i].key_package,
           JSON.stringify(newRound1Results[i].nonces),
-          newCommitmentsJson,
-          messageHex,
-          newRandomizer
+          newSigningPackage.signing_package,
+          newSigningPackage.randomizer
         )
       );
       newShares.push(share);
     }
 
-    // Aggregate with new randomizer
+    // Aggregate with new signing package
     const newAggResult = parseResult<AggregateResult>(
       frost.aggregate_signature(
         JSON.stringify(newShares),
-        newCommitmentsJson,
-        messageHex,
+        newSigningPackage.signing_package,
         keygen.public_key_package,
-        newRandomizer
+        newSigningPackage.randomizer
       )
     );
 
@@ -369,7 +360,7 @@ async function main() {
         newAggResult.signature,
         messageHex,
         keygen.group_public_key,
-        newRandomizer
+        newSigningPackage.randomizer
       )
     );
 

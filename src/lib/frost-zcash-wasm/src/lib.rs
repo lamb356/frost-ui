@@ -17,10 +17,10 @@ use wasm_bindgen::prelude::*;
 // Import RedPallas FROST types from reddsa
 use reddsa::frost::redpallas::{
     self,
-    keys::{self, KeyPackage, PublicKeyPackage, SecretShare},
+    keys::{self, IdentifierList, KeyPackage, PublicKeyPackage},
     round1::{self, SigningCommitments, SigningNonces},
     round2::{self, SignatureShare},
-    Identifier, RandomizedParams, Randomizer, Signature, SigningPackage,
+    Identifier, RandomizedParams, Signature, SigningPackage,
 };
 
 // =============================================================================
@@ -127,6 +127,19 @@ pub struct SignatureShareInfo {
 }
 
 // =============================================================================
+// Signing Package Types
+// =============================================================================
+
+/// Result of creating a signing package with randomizer
+#[derive(Serialize)]
+pub struct SigningPackageResult {
+    /// Serialized SigningPackage (JSON)
+    pub signing_package: String,
+    /// Serialized randomizer (JSON) - needed for signing and verification
+    pub randomizer: String,
+}
+
+// =============================================================================
 // Aggregation Types
 // =============================================================================
 
@@ -135,7 +148,7 @@ pub struct SignatureShareInfo {
 pub struct AggregateResult {
     /// Final aggregate signature (hex)
     pub signature: String,
-    /// Randomizer used (hex) - for verification
+    /// Randomizer used (JSON) - for verification
     pub randomizer: String,
 }
 
@@ -187,19 +200,16 @@ fn generate_key_shares_internal(threshold: u16, total: u16) -> Result<KeyGenResu
 
     let mut rng = OsRng;
 
-    // Generate identifiers
-    let identifiers: Vec<Identifier> = (1..=total)
-        .map(|i| Identifier::try_from(i).expect("valid identifier"))
-        .collect();
-
-    // Generate key shares using trusted dealer
+    // Generate key shares using trusted dealer with default identifiers
     let (shares, pubkey_package) =
-        keys::generate_with_dealer(total, threshold, identifiers.clone(), &mut rng)
+        keys::generate_with_dealer(total, threshold, IdentifierList::Default, &mut rng)
             .map_err(|e| format!("Key generation failed: {:?}", e))?;
 
     // Extract group public key
     let group_pubkey = pubkey_package.verifying_key();
-    let group_pubkey_bytes = group_pubkey.serialize();
+    let group_pubkey_bytes = group_pubkey
+        .serialize()
+        .map_err(|e| format!("Failed to serialize group public key: {:?}", e))?;
     let group_pubkey_hex = hex::encode(group_pubkey_bytes);
 
     // Serialize public key package for later use in aggregation
@@ -218,7 +228,9 @@ fn generate_key_shares_internal(threshold: u16, total: u16) -> Result<KeyGenResu
         let key_package_json =
             serde_json::to_string(&key_package).map_err(|e| format!("Serialize error: {}", e))?;
 
-        let id_bytes = id.serialize();
+        let id_bytes = id
+            .serialize()
+            .map_err(|e| format!("Failed to serialize identifier: {:?}", e))?;
         let id_num = u16::from_le_bytes([id_bytes[0], id_bytes[1]]);
 
         key_shares.push(KeyShareInfo {
@@ -271,7 +283,9 @@ fn generate_round1_internal(key_package_json: &str) -> Result<Round1Result, Stri
 
     // Get identifier
     let identifier = *key_package.identifier();
-    let id_bytes = identifier.serialize();
+    let id_bytes = identifier
+        .serialize()
+        .map_err(|e| format!("Failed to serialize identifier: {:?}", e))?;
     let id_num = u16::from_le_bytes([id_bytes[0], id_bytes[1]]);
 
     // Generate nonces and commitments
@@ -298,42 +312,85 @@ fn generate_round1_internal(key_package_json: &str) -> Result<Round1Result, Stri
 }
 
 // =============================================================================
-// Randomizer Generation
+// Signing Package Creation (with Randomizer)
 // =============================================================================
 
-/// Generate a new randomizer for rerandomized FROST signing
+/// Create a signing package with randomizer for rerandomized FROST
+///
+/// This should be called by the coordinator after collecting all commitments.
+/// The randomizer is generated from the signing package and must be distributed
+/// to all signers via a secure channel.
+///
+/// # Arguments
+/// * `commitments_json` - All participants' commitments (JSON array)
+/// * `message_hex` - Message to sign (hex-encoded)
+/// * `public_key_package_json` - Public key package (JSON)
 ///
 /// # Returns
-/// JSON string containing the randomizer or FrostError
+/// JSON string containing SigningPackageResult or FrostError
 #[wasm_bindgen]
-pub fn generate_randomizer() -> String {
-    match generate_randomizer_internal() {
-        Ok(result) => serde_json::to_string(&result).unwrap(),
-        Err(e) => FrostResult::<String>::Err(FrostError {
-            code: "RANDOMIZER_ERROR".into(),
+pub fn create_signing_package(
+    commitments_json: &str,
+    message_hex: &str,
+    public_key_package_json: &str,
+) -> String {
+    match create_signing_package_internal(commitments_json, message_hex, public_key_package_json) {
+        Ok(result) => FrostResult::Ok(result).to_json(),
+        Err(e) => FrostResult::<SigningPackageResult>::Err(FrostError {
+            code: "SIGNING_PACKAGE_ERROR".into(),
             message: e,
         })
         .to_json(),
     }
 }
 
-#[derive(Serialize)]
-struct RandomizerResult {
-    /// Randomizer (hex-encoded)
-    randomizer: String,
-}
-
-fn generate_randomizer_internal() -> Result<RandomizerResult, String> {
+fn create_signing_package_internal(
+    commitments_json: &str,
+    message_hex: &str,
+    public_key_package_json: &str,
+) -> Result<SigningPackageResult, String> {
     let mut rng = OsRng;
 
-    // Generate random scalar for randomizer
-    let randomizer = Randomizer::new(&mut rng);
+    // Parse commitments
+    let commitments_list: Vec<CommitmentInfo> = serde_json::from_str(commitments_json)
+        .map_err(|e| format!("Invalid commitments JSON: {}", e))?;
+
+    // Parse message
+    let message = hex::decode(message_hex).map_err(|e| format!("Invalid message hex: {}", e))?;
+
+    // Parse public key package
+    let pubkey_package: PublicKeyPackage = serde_json::from_str(public_key_package_json)
+        .map_err(|e| format!("Invalid public key package JSON: {}", e))?;
+
+    // Build commitments map
+    let mut commitments_map: BTreeMap<Identifier, SigningCommitments> = BTreeMap::new();
+    for c in commitments_list {
+        let id = Identifier::try_from(c.identifier)
+            .map_err(|_| format!("Invalid identifier: {}", c.identifier))?;
+        let commitment: SigningCommitments = serde_json::from_str(&c.commitment)
+            .map_err(|e| format!("Invalid commitment JSON: {}", e))?;
+        commitments_map.insert(id, commitment);
+    }
+
+    // Create signing package
+    let signing_package = SigningPackage::new(commitments_map, &message);
+
+    // Generate randomized params (includes randomizer)
+    let randomized_params =
+        RandomizedParams::new(pubkey_package.verifying_key(), &signing_package, &mut rng)
+            .map_err(|e| format!("Failed to create randomized params: {:?}", e))?;
+
+    // Serialize signing package
+    let signing_package_json = serde_json::to_string(&signing_package)
+        .map_err(|e| format!("Serialize signing package error: {}", e))?;
 
     // Serialize randomizer
-    let randomizer_json =
-        serde_json::to_string(&randomizer).map_err(|e| format!("Serialize error: {}", e))?;
+    let randomizer = randomized_params.randomizer();
+    let randomizer_json = serde_json::to_string(randomizer)
+        .map_err(|e| format!("Serialize randomizer error: {}", e))?;
 
-    Ok(RandomizerResult {
+    Ok(SigningPackageResult {
+        signing_package: signing_package_json,
         randomizer: randomizer_json,
     })
 }
@@ -347,8 +404,7 @@ fn generate_randomizer_internal() -> Result<RandomizerResult, String> {
 /// # Arguments
 /// * `key_package_json` - Participant's key package (JSON)
 /// * `nonces_json` - Participant's nonces from Round 1 (JSON)
-/// * `commitments_json` - All participants' commitments (JSON array)
-/// * `message_hex` - Message to sign (hex-encoded)
+/// * `signing_package_json` - Signing package from coordinator (JSON)
 /// * `randomizer_json` - Randomizer from coordinator (JSON)
 ///
 /// # Returns
@@ -357,15 +413,13 @@ fn generate_randomizer_internal() -> Result<RandomizerResult, String> {
 pub fn generate_round2_signature(
     key_package_json: &str,
     nonces_json: &str,
-    commitments_json: &str,
-    message_hex: &str,
+    signing_package_json: &str,
     randomizer_json: &str,
 ) -> String {
     match generate_round2_internal(
         key_package_json,
         nonces_json,
-        commitments_json,
-        message_hex,
+        signing_package_json,
         randomizer_json,
     ) {
         Ok(result) => FrostResult::Ok(result).to_json(),
@@ -380,8 +434,7 @@ pub fn generate_round2_signature(
 fn generate_round2_internal(
     key_package_json: &str,
     nonces_json: &str,
-    commitments_json: &str,
-    message_hex: &str,
+    signing_package_json: &str,
     randomizer_json: &str,
 ) -> Result<SignatureShareInfo, String> {
     // Parse inputs
@@ -394,27 +447,11 @@ fn generate_round2_internal(
     let nonces: SigningNonces = serde_json::from_str(&nonces_info.nonces)
         .map_err(|e| format!("Invalid inner nonces JSON: {}", e))?;
 
-    let commitments_list: Vec<CommitmentInfo> = serde_json::from_str(commitments_json)
-        .map_err(|e| format!("Invalid commitments JSON: {}", e))?;
+    let signing_package: SigningPackage = serde_json::from_str(signing_package_json)
+        .map_err(|e| format!("Invalid signing package JSON: {}", e))?;
 
-    let message = hex::decode(message_hex).map_err(|e| format!("Invalid message hex: {}", e))?;
-
-    let randomizer: Randomizer = serde_json::from_str(randomizer_json)
+    let randomizer: reddsa::frost::redpallas::Randomizer = serde_json::from_str(randomizer_json)
         .map_err(|e| format!("Invalid randomizer JSON: {}", e))?;
-
-    // Build commitments map
-    let mut commitments_map: BTreeMap<Identifier, SigningCommitments> = BTreeMap::new();
-    for c in commitments_list {
-        let id = Identifier::try_from(c.identifier)
-            .map_err(|_| format!("Invalid identifier: {}", c.identifier))?;
-        let commitment: SigningCommitments = serde_json::from_str(&c.commitment)
-            .map_err(|e| format!("Invalid commitment JSON: {}", e))?;
-        commitments_map.insert(id, commitment);
-    }
-
-    // Create signing package
-    let signing_package = SigningPackage::new(commitments_map, &message)
-        .map_err(|e| format!("Failed to create signing package: {:?}", e))?;
 
     // Generate signature share with rerandomization
     let signature_share = round2::sign(&signing_package, &nonces, &key_package, randomizer)
@@ -426,7 +463,9 @@ fn generate_round2_internal(
 
     // Get identifier
     let id = *key_package.identifier();
-    let id_bytes = id.serialize();
+    let id_bytes = id
+        .serialize()
+        .map_err(|e| format!("Failed to serialize identifier: {:?}", e))?;
     let id_num = u16::from_le_bytes([id_bytes[0], id_bytes[1]]);
 
     Ok(SignatureShareInfo {
@@ -443,8 +482,7 @@ fn generate_round2_internal(
 ///
 /// # Arguments
 /// * `shares_json` - All signature shares (JSON array)
-/// * `commitments_json` - All commitments (JSON array)
-/// * `message_hex` - Message that was signed (hex-encoded)
+/// * `signing_package_json` - Signing package (JSON)
 /// * `public_key_package_json` - Public key package (JSON)
 /// * `randomizer_json` - Randomizer used for signing (JSON)
 ///
@@ -453,15 +491,13 @@ fn generate_round2_internal(
 #[wasm_bindgen]
 pub fn aggregate_signature(
     shares_json: &str,
-    commitments_json: &str,
-    message_hex: &str,
+    signing_package_json: &str,
     public_key_package_json: &str,
     randomizer_json: &str,
 ) -> String {
     match aggregate_internal(
         shares_json,
-        commitments_json,
-        message_hex,
+        signing_package_json,
         public_key_package_json,
         randomizer_json,
     ) {
@@ -476,8 +512,7 @@ pub fn aggregate_signature(
 
 fn aggregate_internal(
     shares_json: &str,
-    commitments_json: &str,
-    message_hex: &str,
+    signing_package_json: &str,
     public_key_package_json: &str,
     randomizer_json: &str,
 ) -> Result<AggregateResult, String> {
@@ -485,26 +520,14 @@ fn aggregate_internal(
     let shares_list: Vec<SignatureShareInfo> =
         serde_json::from_str(shares_json).map_err(|e| format!("Invalid shares JSON: {}", e))?;
 
-    let commitments_list: Vec<CommitmentInfo> = serde_json::from_str(commitments_json)
-        .map_err(|e| format!("Invalid commitments JSON: {}", e))?;
-
-    let message = hex::decode(message_hex).map_err(|e| format!("Invalid message hex: {}", e))?;
+    let signing_package: SigningPackage = serde_json::from_str(signing_package_json)
+        .map_err(|e| format!("Invalid signing package JSON: {}", e))?;
 
     let pubkey_package: PublicKeyPackage = serde_json::from_str(public_key_package_json)
         .map_err(|e| format!("Invalid public key package JSON: {}", e))?;
 
-    let randomizer: Randomizer = serde_json::from_str(randomizer_json)
+    let randomizer: reddsa::frost::redpallas::Randomizer = serde_json::from_str(randomizer_json)
         .map_err(|e| format!("Invalid randomizer JSON: {}", e))?;
-
-    // Build commitments map
-    let mut commitments_map: BTreeMap<Identifier, SigningCommitments> = BTreeMap::new();
-    for c in commitments_list {
-        let id = Identifier::try_from(c.identifier)
-            .map_err(|_| format!("Invalid identifier: {}", c.identifier))?;
-        let commitment: SigningCommitments = serde_json::from_str(&c.commitment)
-            .map_err(|e| format!("Invalid commitment JSON: {}", e))?;
-        commitments_map.insert(id, commitment);
-    }
 
     // Build signature shares map
     let mut shares_map: BTreeMap<Identifier, SignatureShare> = BTreeMap::new();
@@ -516,22 +539,22 @@ fn aggregate_internal(
         shares_map.insert(id, share);
     }
 
-    // Create signing package
-    let signing_package = SigningPackage::new(commitments_map, &message)
-        .map_err(|e| format!("Failed to create signing package: {:?}", e))?;
-
     // Create randomized params for aggregation
-    let randomized_params = RandomizedParams::from_randomizer(pubkey_package.verifying_key(), randomizer);
+    let randomized_params =
+        RandomizedParams::from_randomizer(pubkey_package.verifying_key(), randomizer);
 
     // Aggregate signature
-    let signature = redpallas::aggregate(&signing_package, &shares_map, &pubkey_package, &randomized_params)
-        .map_err(|e| format!("Aggregation failed: {:?}", e))?;
+    let signature =
+        redpallas::aggregate(&signing_package, &shares_map, &pubkey_package, &randomized_params)
+            .map_err(|e| format!("Aggregation failed: {:?}", e))?;
 
     // Serialize signature
-    let sig_bytes = signature.serialize();
+    let sig_bytes = signature
+        .serialize()
+        .map_err(|e| format!("Failed to serialize signature: {:?}", e))?;
     let sig_hex = hex::encode(sig_bytes);
 
-    // Also return the randomizer for verification
+    // Return the randomizer for verification
     let randomizer_json =
         serde_json::to_string(&randomizer).map_err(|e| format!("Serialize error: {}", e))?;
 
@@ -563,9 +586,7 @@ pub fn verify_signature(
     randomizer_json: &str,
 ) -> String {
     match verify_internal(signature_hex, message_hex, group_public_key_hex, randomizer_json) {
-        Ok(valid) => {
-            serde_json::to_string(&VerifyResult { valid }).unwrap()
-        }
+        Ok(valid) => serde_json::to_string(&VerifyResult { valid }).unwrap(),
         Err(e) => FrostResult::<VerifyResult>::Err(FrostError {
             code: "VERIFY_ERROR".into(),
             message: e,
@@ -586,11 +607,12 @@ fn verify_internal(
     randomizer_json: &str,
 ) -> Result<bool, String> {
     // Parse signature
-    let sig_bytes = hex::decode(signature_hex).map_err(|e| format!("Invalid signature hex: {}", e))?;
+    let sig_bytes =
+        hex::decode(signature_hex).map_err(|e| format!("Invalid signature hex: {}", e))?;
     let sig_array: [u8; 64] = sig_bytes
         .try_into()
         .map_err(|_| "Signature must be 64 bytes")?;
-    let signature = Signature::deserialize(sig_array)
+    let signature = Signature::deserialize(&sig_array)
         .map_err(|e| format!("Invalid signature: {:?}", e))?;
 
     // Parse message
@@ -602,11 +624,11 @@ fn verify_internal(
     let pubkey_array: [u8; 32] = pubkey_bytes
         .try_into()
         .map_err(|_| "Public key must be 32 bytes")?;
-    let verifying_key = redpallas::VerifyingKey::deserialize(pubkey_array)
+    let verifying_key = redpallas::VerifyingKey::deserialize(&pubkey_array)
         .map_err(|e| format!("Invalid verifying key: {:?}", e))?;
 
     // Parse randomizer
-    let randomizer: Randomizer = serde_json::from_str(randomizer_json)
+    let randomizer: reddsa::frost::redpallas::Randomizer = serde_json::from_str(randomizer_json)
         .map_err(|e| format!("Invalid randomizer JSON: {}", e))?;
 
     // Create randomized params and get randomized public key
@@ -614,7 +636,6 @@ fn verify_internal(
     let randomized_verifying_key = randomized_params.randomized_verifying_key();
 
     // Verify signature against randomized public key
-    // For rerandomized FROST, verification is against the randomized key
     match randomized_verifying_key.verify(&message, &signature) {
         Ok(()) => Ok(true),
         Err(_) => Ok(false),
@@ -655,11 +676,15 @@ fn get_public_key_internal(key_package_json: &str) -> Result<PublicKeyResult, St
         .map_err(|e| format!("Invalid key package JSON: {}", e))?;
 
     let verifying_share = key_package.verifying_share();
-    let pubkey_bytes = verifying_share.serialize();
+    let pubkey_bytes = verifying_share
+        .serialize()
+        .map_err(|e| format!("Failed to serialize verifying share: {:?}", e))?;
     let pubkey_hex = hex::encode(pubkey_bytes);
 
     let id = *key_package.identifier();
-    let id_bytes = id.serialize();
+    let id_bytes = id
+        .serialize()
+        .map_err(|e| format!("Failed to serialize identifier: {:?}", e))?;
     let id_num = u16::from_le_bytes([id_bytes[0], id_bytes[1]]);
 
     Ok(PublicKeyResult {
@@ -692,7 +717,9 @@ fn get_group_public_key_internal(public_key_package_json: &str) -> Result<String
         .map_err(|e| format!("Invalid public key package JSON: {}", e))?;
 
     let verifying_key = pubkey_package.verifying_key();
-    let pubkey_bytes = verifying_key.serialize();
+    let pubkey_bytes = verifying_key
+        .serialize()
+        .map_err(|e| format!("Failed to serialize verifying key: {:?}", e))?;
     Ok(hex::encode(pubkey_bytes))
 }
 
@@ -736,23 +763,22 @@ mod tests {
         let commitments = vec![r1_1.commitment.clone(), r1_2.commitment.clone()];
         let commitments_json = serde_json::to_string(&commitments).unwrap();
 
-        // Generate randomizer
-        let randomizer_result = generate_randomizer();
-        let randomizer_parsed: RandomizerResult =
-            serde_json::from_str(&randomizer_result).expect("Randomizer should succeed");
-        let randomizer_json = &randomizer_parsed.randomizer;
-
         // Message to sign
         let message = "48656c6c6f20576f726c64"; // "Hello World" in hex
+
+        // Create signing package with randomizer
+        let signing_pkg_result =
+            create_signing_package(&commitments_json, message, &keygen.public_key_package);
+        let signing_pkg: SigningPackageResult = serde_json::from_str(&signing_pkg_result)
+            .expect("Signing package creation should succeed");
 
         // Round 2: Generate signature shares with randomizer
         let nonces_1 = serde_json::to_string(&r1_1.nonces).unwrap();
         let sig_share_1 = generate_round2_signature(
             &keygen.shares[0].key_package,
             &nonces_1,
-            &commitments_json,
-            message,
-            randomizer_json,
+            &signing_pkg.signing_package,
+            &signing_pkg.randomizer,
         );
         let share_1: SignatureShareInfo =
             serde_json::from_str(&sig_share_1).expect("Round 2 participant 1 should succeed");
@@ -761,9 +787,8 @@ mod tests {
         let sig_share_2 = generate_round2_signature(
             &keygen.shares[1].key_package,
             &nonces_2,
-            &commitments_json,
-            message,
-            randomizer_json,
+            &signing_pkg.signing_package,
+            &signing_pkg.randomizer,
         );
         let share_2: SignatureShareInfo =
             serde_json::from_str(&sig_share_2).expect("Round 2 participant 2 should succeed");
@@ -774,10 +799,9 @@ mod tests {
 
         let agg_result = aggregate_signature(
             &shares_json,
-            &commitments_json,
-            message,
+            &signing_pkg.signing_package,
             &keygen.public_key_package,
-            randomizer_json,
+            &signing_pkg.randomizer,
         );
         let agg: AggregateResult =
             serde_json::from_str(&agg_result).expect("Aggregation should succeed");
@@ -789,7 +813,7 @@ mod tests {
             &agg.signature,
             message,
             &keygen.group_public_key,
-            randomizer_json,
+            &signing_pkg.randomizer,
         );
         let verify: VerifyResult =
             serde_json::from_str(&verify_result).expect("Verification should succeed");
