@@ -4,11 +4,11 @@ A Next.js web application for FROST (Flexible Round-Optimized Schnorr Threshold)
 
 ## Features
 
-- **Threshold Key Generation**: Create t-of-n key shares using trusted dealer or distributed key generation
+- **Threshold Key Generation**: Create t-of-n key shares using trusted dealer key generation
 - **Signing Ceremonies**: Coordinate multi-party signing sessions with real-time status
-- **WASM Cryptography**: Real FROST operations via WebAssembly (with mock fallback)
+- **WASM Cryptography**: Real FROST operations via WebAssembly (Ed25519 and Orchard/RedPallas)
 - **Session Management**: Track active and completed signing sessions
-- **Demo Mode**: Test the full flow without connecting to a frostd server
+- **frostd Integration**: Connect to frostd server for production ceremony coordination
 
 ## Architecture
 
@@ -24,10 +24,10 @@ A Next.js web application for FROST (Flexible Round-Optimized Schnorr Threshold)
 │  State Management (Zustand)                                 │
 │  └── Sessions, Participants, Connection Status              │
 ├─────────────────────────────────────────────────────────────┤
-│  FROST WASM Module                                          │
-│  ├── frost-ed25519 (Ed25519 signatures)                     │
-│  ├── Key generation, commitment, signing, aggregation       │
-│  └── Falls back to mock if WASM unavailable                 │
+│  FROST WASM Modules                                         │
+│  ├── frost-wasm (Ed25519 signatures)                        │
+│  ├── frost-zcash-wasm (Orchard/RedPallas signatures)        │
+│  └── Key generation, commitment, signing, aggregation       │
 ├─────────────────────────────────────────────────────────────┤
 │  frostd Connection                                          │
 │  └── REST API to frostd server for ceremony coordination    │
@@ -56,10 +56,6 @@ npm run dev
 ```
 
 Open [http://localhost:3000](http://localhost:3000) to view the application.
-
-### Demo Mode
-
-The app includes a demo mode that simulates FROST operations without a real frostd server. Enable it in Settings.
 
 ## WASM Build
 
@@ -181,8 +177,8 @@ The smoke test validates the complete authentication and session flow:
 ## Security Considerations
 
 - **Secret Key Storage**: Signing shares must never be logged or stored unencrypted
-- **Nonce Reuse**: Nonces are single-use; reuse compromises security
-- **Demo Mode**: Uses mock cryptography - not for production signing
+- **Nonce Reuse**: Nonces are single-use and bound to message_id; reuse compromises security
+- **TLS Required**: All frostd communication must use TLS to prevent MITM attacks
 
 ## Related Projects
 

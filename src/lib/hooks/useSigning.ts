@@ -28,16 +28,43 @@ import {
 } from '@/lib/state-machines/participant-machine';
 import type {
   FrostMessage,
-  Round1CommitmentPayload,
-  Round2SignatureSharePayload,
+  WasmCommitment,
+  WasmSignatureShare,
 } from '@/types/messages';
 import {
   createSigningPackage,
   isMessageType,
   hexToMessage,
   messageToHex,
+  generateMessageId,
 } from '@/types/messages';
 import { loadFrostShare } from '@/lib/crypto/keystore';
+import {
+  DeduplicationSet,
+  validateEnvelope,
+} from '@/lib/state-machines/validation';
+
+// =============================================================================
+// Internal Types (used by state machines, not wire format)
+// =============================================================================
+
+/**
+ * Internal commitment format used by state machines.
+ * This is converted to/from wire format when sending/receiving messages.
+ */
+interface InternalCommitment {
+  participantId: number;
+  hiding: string;
+  binding: string;
+}
+
+/**
+ * Internal signature share format used by state machines.
+ */
+interface InternalSignatureShare {
+  participantId: number;
+  share: string;
+}
 
 // =============================================================================
 // Types
@@ -117,6 +144,7 @@ export function useSigning(): UseSigningResult {
   const participantActorRef = useRef<ReturnType<typeof createActor<typeof participantMachine>> | null>(null);
   const pollAbortRef = useRef<AbortController | null>(null);
   const keyPackageRef = useRef<KeyPackage | null>(null);
+  const dedupeSetRef = useRef<DeduplicationSet>(new DeduplicationSet());
 
   // Load backend on backendId change
   useEffect(() => {
@@ -200,39 +228,44 @@ export function useSigning(): UseSigningResult {
                 await client.send(sid, recipients, hexMsg);
               }),
               aggregateSignature: fromPromise(async ({ input }) => {
-                const { message, commitments, shares } = input as {
+                // The coordinator machine passes commitments/shares from context
+                // These are stored in WASM format (from Round 1/2 results)
+                const { message, commitments, shares, publicKeyPackage, randomizer } = input as {
                   message: string;
-                  commitments: Round1CommitmentPayload[];
-                  shares: Round2SignatureSharePayload[];
+                  commitments: WasmCommitment[];
+                  shares: WasmSignatureShare[];
+                  publicKeyPackage: string;
+                  randomizer?: string;
                 };
-                // Use backend to aggregate
+                // Create signing package in WASM format
                 const signingPackage = JSON.stringify({
                   message,
-                  commitments: commitments.map((c: Round1CommitmentPayload) => ({
-                    identifier: c.participantId,
-                    hiding: c.hiding,
-                    binding: c.binding,
+                  commitments: commitments.map((c: WasmCommitment) => ({
+                    identifier: c.identifier,
+                    commitment: c.commitment,
                   })),
                 });
                 const sharesRecord: Record<string, string> = {};
-                shares.forEach((s: Round2SignatureSharePayload) => {
-                  sharesRecord[String(s.participantId)] = JSON.stringify({
-                    identifier: s.participantId,
+                shares.forEach((s: WasmSignatureShare) => {
+                  sharesRecord[String(s.identifier)] = JSON.stringify({
+                    identifier: s.identifier,
                     share: s.share,
                   });
                 });
-                // For now, use a placeholder - real aggregation needs publicKeyPackage
                 const signature = await backend.aggregateSignature(
                   signingPackage,
                   sharesRecord,
-                  '{}', // publicKeyPackage - needs to be passed from context
-                  undefined // randomizer for Orchard
+                  publicKeyPackage,
+                  randomizer
                 );
+                // Get group public key from publicKeyPackage for verification
+                const pkgParsed = JSON.parse(publicKeyPackage);
+                const groupPublicKey = pkgParsed.group_public_key || pkgParsed.groupPublicKey || '';
                 const verified = await backend.verifySignature(
                   signature,
                   message,
-                  '', // groupPublicKey
-                  undefined
+                  groupPublicKey,
+                  randomizer
                 );
                 return { signature, verified };
               }),
@@ -338,19 +371,30 @@ export function useSigning(): UseSigningResult {
     const ctx = actor.getSnapshot().context as CoordinatorContext;
     if (!ctx.sessionId || !pubkey) return;
 
+    // Generate message_id for this signing attempt
+    const messageId = generateMessageId();
+
+    // Get selected signer pubkeys (filter out coordinator if not signing)
+    const selectedSigners = ctx.participantPubkeys.filter((_, i) =>
+      signerIds.includes(i + 1) // participant IDs are 1-indexed
+    );
+
     // Create and broadcast SIGNING_PACKAGE
     const signingPkg = createSigningPackage(
       ctx.sessionId,
       pubkey,
       state.backendId,
+      messageId,
       message,
+      selectedSigners,
       signerIds
     );
 
-    // Send via client
+    // Send via client to participants (not to self)
     if (client) {
       const hexMsg = messageToHex(signingPkg);
-      client.send(ctx.sessionId, ctx.participantPubkeys, hexMsg);
+      const recipients = ctx.participantPubkeys.filter((p) => p !== pubkey);
+      client.send(ctx.sessionId, recipients, hexMsg);
     }
 
     actor.send({ type: 'UI_START_SIGNING', message, signerIds });
@@ -419,7 +463,7 @@ export function useSigning(): UseSigningResult {
                   binding: JSON.parse(result.nonces).binding,
                 };
 
-                const commitment: Round1CommitmentPayload = {
+                const commitment: InternalCommitment = {
                   participantId: input.participantId,
                   hiding: JSON.parse(result.commitment).hiding,
                   binding: JSON.parse(result.commitment).binding,
@@ -436,13 +480,13 @@ export function useSigning(): UseSigningResult {
                   keyPackage: KeyPackage;
                   nonces: SigningNonces;
                   message: string;
-                  allCommitments: Round1CommitmentPayload[];
+                  allCommitments: InternalCommitment[];
                   signerIds: number[];
                 };
 
                 const signingPackage = JSON.stringify({
                   message: typedInput.message,
-                  commitments: typedInput.allCommitments.map((c: Round1CommitmentPayload) => ({
+                  commitments: typedInput.allCommitments.map((c: InternalCommitment) => ({
                     identifier: c.participantId,
                     hiding: c.hiding,
                     binding: c.binding,
@@ -466,7 +510,7 @@ export function useSigning(): UseSigningResult {
                 );
 
                 const parsed = JSON.parse(result);
-                const share: Round2SignatureSharePayload = {
+                const share: InternalSignatureShare = {
                   participantId: typedInput.participantId,
                   share: parsed.share,
                 };
@@ -592,6 +636,26 @@ export function useSigning(): UseSigningResult {
               const decoded = hexToMessage(msg.msg);
               if (!decoded) continue;
 
+              // === INGRESS VALIDATION ===
+              // 1. Validate message envelope structure
+              const envelopeResult = validateEnvelope(decoded);
+              if (!envelopeResult.valid) {
+                console.warn('Invalid message envelope:', envelopeResult.error.message);
+                continue;
+              }
+
+              // 2. Check session ID matches
+              if (decoded.sid !== sessionId) {
+                console.warn('Message session ID mismatch:', decoded.sid, 'expected', sessionId);
+                continue;
+              }
+
+              // 3. Deduplication check (markSeen returns false if already seen)
+              if (!dedupeSetRef.current.markSeen(decoded.sid, decoded.id)) {
+                console.debug('Duplicate message ignored:', decoded.id);
+                continue;
+              }
+
               // Dispatch to appropriate actor
               if (asCoordinator && coordinatorActorRef.current) {
                 handleCoordinatorMessage(decoded);
@@ -620,18 +684,23 @@ export function useSigning(): UseSigningResult {
 
     if (isMessageType(msg, 'ROUND1_COMMITMENT')) {
       const payload = msg.payload;
+      // Convert from wire format (WasmCommitment) to internal event format
+      // The commitment object contains identifier and the commitment string
+      // Parse the commitment string to get hiding/binding (for Ed25519) or use raw (for Orchard)
+      const commitmentData = JSON.parse(payload.commitment.commitment);
       actor.send({
         type: 'RX_ROUND1_COMMITMENT',
-        participantId: payload.participantId,
-        hiding: payload.hiding,
-        binding: payload.binding,
+        participantId: payload.commitment.identifier,
+        hiding: commitmentData.hiding || '',
+        binding: commitmentData.binding || '',
       } as CoordinatorEvent);
     } else if (isMessageType(msg, 'ROUND2_SIGNATURE_SHARE')) {
       const payload = msg.payload;
+      // Convert from wire format (WasmSignatureShare) to internal event format
       actor.send({
         type: 'RX_ROUND2_SIGNATURE_SHARE',
-        participantId: payload.participantId,
-        share: payload.share,
+        participantId: payload.share.identifier,
+        share: payload.share.share,
       } as CoordinatorEvent);
     } else if (isMessageType(msg, 'ABORT')) {
       const payload = msg.payload;
@@ -660,18 +729,32 @@ export function useSigning(): UseSigningResult {
       }
       actor.send({
         type: 'RX_SIGNING_PACKAGE',
-        message: payload.message,
-        signerIds: payload.signerIds,
-        coordinatorPubkey: payload.coordinatorPubkey,
-        msgId: msg.id,
+        message: payload.message_to_sign,
+        signerIds: payload.signer_ids,
+        coordinatorPubkey: msg.from, // Coordinator's pubkey is the sender
+        msgId: payload.message_id,
       } as ParticipantEvent);
     } else if (isMessageType(msg, 'COMMITMENTS_SET')) {
       const payload = msg.payload;
+      // Convert WasmCommitment array to internal format for participant machine
+      // The machine expects commitments as array of { participantId, hiding, binding }
+      const internalCommitments = payload.commitments.map((c) => {
+        const data = JSON.parse(c.commitment);
+        return {
+          participantId: c.identifier,
+          hiding: data.hiding || '',
+          binding: data.binding || '',
+        };
+      });
+      // Cast through unknown because machine types need updating to match new wire format
       actor.send({
         type: 'RX_COMMITMENTS_SET',
-        commitments: payload.commitments,
-        message: payload.message,
-      } as ParticipantEvent);
+        commitments: internalCommitments,
+        message: '', // Message is in signing_package, not echoed in new format
+        signingPackage: payload.signing_package,
+        randomizer: payload.randomizer,
+        groupPublicKey: payload.group_public_key,
+      } as unknown as ParticipantEvent);
     } else if (isMessageType(msg, 'SIGNATURE_RESULT')) {
       const payload = msg.payload;
       actor.send({
@@ -725,6 +808,9 @@ export function useSigning(): UseSigningResult {
       participantActorRef.current.stop();
       participantActorRef.current = null;
     }
+
+    // Reset deduplication set
+    dedupeSetRef.current = new DeduplicationSet();
 
     // Reset state
     setState({

@@ -42,16 +42,20 @@ This document describes the threat model and security properties of the FROST mu
 ```typescript
 // participant-machine.ts
 context: {
-  nonceMessageId: string | null,  // Tracks which message nonces are for
-  currentNonces: string | null,   // Nonces (never persisted)
+  messageId: string | null,       // Current signing attempt's message_id
+  nonceMessageId: string | null,  // Tracks which message nonces are bound to
+  nonces: SigningNonces | null,   // Nonces (never persisted)
 }
 
 // On SIGNING_PACKAGE received:
-if (context.nonceMessageId !== payload.message_id) {
-  // Generate fresh nonces for new signing request
-  context.currentNonces = frost.generate_round1_commitment(...);
-  context.nonceMessageId = payload.message_id;
+if (context.nonceMessageId !== null && context.nonceMessageId === payload.message_id) {
+  // REJECT - nonce reuse detected
+  return error('NONCE_REUSE_DETECTED');
 }
+// Generate fresh nonces for new signing request
+context.nonces = frost.generate_round1_commitment(...);
+context.messageId = payload.message_id;
+context.nonceMessageId = payload.message_id;  // Bind nonces to this message_id
 ```
 
 ## Replay Protection
@@ -281,7 +285,7 @@ Key files to review:
 | Zcash curves | ❌ Not delivered | ✅ RedPallas (Orchard) |
 | E2E encryption | ❌ Not delivered | ✅ X25519 + AES-GCM |
 | frostd integration | ❌ Partial | ✅ Full spec compliance |
-| Test coverage | ❌ None | ✅ 52+ passing tests |
+| Test coverage | ❌ None | ✅ 76+ passing tests |
 
 ## References
 

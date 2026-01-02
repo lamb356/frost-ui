@@ -15,9 +15,9 @@
 import { createMachine, assign, fromPromise, type ActorRefFrom } from 'xstate';
 import type {
   FrostMessage,
-  Round1CommitmentPayload,
-  Round2SignatureSharePayload,
   AbortReason,
+  WasmCommitment,
+  WasmSignatureShare,
 } from '@/types/messages';
 import {
   createRound1Commitment,
@@ -25,6 +25,29 @@ import {
   createAbort,
 } from '@/types/messages';
 import { type ProtocolPhase, DeduplicationSet } from './validation';
+
+// =============================================================================
+// Internal Types (separate from wire format)
+// =============================================================================
+
+/**
+ * Internal commitment format stored in participant context.
+ * This is separate from the wire format (WasmCommitment).
+ */
+export interface InternalCommitment {
+  participantId: number;
+  hiding: string;
+  binding: string;
+}
+
+/**
+ * Internal signature share format stored in participant context.
+ * This is separate from the wire format (WasmSignatureShare).
+ */
+export interface InternalSignatureShare {
+  participantId: number;
+  share: string;
+}
 
 // =============================================================================
 // Types
@@ -37,12 +60,13 @@ export interface ParticipantContext {
   keyPackage: KeyPackage | null;
   messageLog: FrostMessage[];
   signingMessage: string | null;
+  messageId: string | null;  // message_id from SIGNING_PACKAGE
   signerIds: number[];
   coordinatorPubkey: string | null;
   nonces: SigningNonces | null;
-  commitment: Round1CommitmentPayload | null;
-  allCommitments: Round1CommitmentPayload[];
-  signatureShare: Round2SignatureSharePayload | null;
+  commitment: InternalCommitment | null;
+  allCommitments: InternalCommitment[];
+  signatureShare: InternalSignatureShare | null;
   aggregateSignature: string | null;
   verified: boolean;
   userConfirmed: boolean;
@@ -54,6 +78,10 @@ export interface ParticipantContext {
   round2TimeoutMs: number;
   resultTimeoutMs: number;
   phase: ProtocolPhase;
+  // New fields for canonical wire format
+  signingPackage: string | null;  // From COMMITMENTS_SET
+  randomizer: string | null;       // From COMMITMENTS_SET
+  groupPublicKey: string | null;   // From COMMITMENTS_SET
 }
 
 export interface KeyPackage {
@@ -95,11 +123,11 @@ export type ParticipantEvent =
   | { type: 'UI_CANCEL' }
   | { type: 'UI_RESET' }
   | { type: 'RX_SIGNING_PACKAGE'; message: string; signerIds: number[]; coordinatorPubkey: string; msgId: string }
-  | { type: 'RX_COMMITMENTS_SET'; commitments: Round1CommitmentPayload[]; message: string }
+  | { type: 'RX_COMMITMENTS_SET'; commitments: InternalCommitment[]; message: string; signingPackage?: string; randomizer?: string; groupPublicKey?: string }
   | { type: 'RX_SIGNATURE_RESULT'; signature: string; verified: boolean }
   | { type: 'RX_ABORT'; reason: AbortReason; message: string }
-  | { type: 'ROUND1_GENERATED'; nonces: SigningNonces; commitment: Round1CommitmentPayload }
-  | { type: 'ROUND2_GENERATED'; share: Round2SignatureSharePayload }
+  | { type: 'ROUND1_GENERATED'; nonces: SigningNonces; commitment: InternalCommitment }
+  | { type: 'ROUND2_GENERATED'; share: InternalSignatureShare }
   | { type: 'SEND_SUCCESS' }
   | { type: 'SEND_FAILED'; error: string }
   | { type: 'SESSION_INFO_OK'; coordinatorPubkey: string }
@@ -122,6 +150,7 @@ export function createInitialParticipantContext(
     keyPackage,
     messageLog: [],
     signingMessage: null,
+    messageId: null,
     signerIds: [],
     coordinatorPubkey: null,
     nonces: null,
@@ -139,6 +168,9 @@ export function createInitialParticipantContext(
     round2TimeoutMs: options.round2TimeoutMs ?? 120000,
     resultTimeoutMs: options.resultTimeoutMs ?? 120000,
     phase: 'idle',
+    signingPackage: null,
+    randomizer: null,
+    groupPublicKey: null,
   };
 }
 
@@ -161,21 +193,23 @@ export const sendMessageActor = fromPromise<
 });
 
 export const generateRound1Actor = fromPromise<
-  { nonces: SigningNonces; commitment: Round1CommitmentPayload },
+  { nonces: SigningNonces; commitment: InternalCommitment },
   { participantId: number; keyPackage: KeyPackage }
 >(async () => {
   throw new Error('generateRound1Actor must be provided via machine options');
 });
 
 export const generateRound2Actor = fromPromise<
-  { share: Round2SignatureSharePayload },
+  { share: InternalSignatureShare },
   {
     participantId: number;
     keyPackage: KeyPackage;
     nonces: SigningNonces;
     message: string;
-    allCommitments: Round1CommitmentPayload[];
+    allCommitments: InternalCommitment[];
     signerIds: number[];
+    signingPackage?: string;
+    randomizer?: string;
   }
 >(async () => {
   throw new Error('generateRound2Actor must be provided via machine options');
@@ -261,6 +295,7 @@ export const participantMachine = createMachine({
               signingMessage: ({ event }) => event.message,
               signerIds: ({ event }) => event.signerIds,
               coordinatorPubkey: ({ event }) => event.coordinatorPubkey,
+              messageId: ({ event }) => event.msgId,
               nonceMessageId: ({ event }) => event.msgId,
               phase: () => 'round1' as ProtocolPhase,
             }),
@@ -330,17 +365,26 @@ export const participantMachine = createMachine({
       invoke: {
         id: 'sendCommitment',
         src: sendMessageActor,
-        input: ({ context }) => ({
-          sessionId: context.sessionId!,
-          message: createRound1Commitment(
-            context.sessionId!,
-            context.participantPubkey,
-            context.participantId,
-            context.commitment!.hiding,
-            context.commitment!.binding
-          ),
-          recipients: [context.coordinatorPubkey!],
-        }),
+        input: ({ context }) => {
+          // Convert internal commitment to wire format (WasmCommitment)
+          const wasmCommitment: WasmCommitment = {
+            identifier: context.commitment!.participantId,
+            commitment: JSON.stringify({
+              hiding: context.commitment!.hiding,
+              binding: context.commitment!.binding,
+            }),
+          };
+          return {
+            sessionId: context.sessionId!,
+            message: createRound1Commitment(
+              context.sessionId!,
+              context.participantPubkey,
+              context.messageId || context.nonceMessageId || '',
+              wasmCommitment
+            ),
+            recipients: [context.coordinatorPubkey!],
+          };
+        },
         onDone: { target: 'awaitCommitments' },
         onError: {
           target: 'failed',
@@ -396,6 +440,9 @@ export const participantMachine = createMachine({
             },
             actions: assign({
               allCommitments: ({ event }) => event.commitments,
+              signingPackage: ({ event }) => event.signingPackage || null,
+              randomizer: ({ event }) => event.randomizer || null,
+              groupPublicKey: ({ event }) => event.groupPublicKey || null,
               phase: () => 'commitments_sent' as ProtocolPhase,
             }),
           },
@@ -462,6 +509,8 @@ export const participantMachine = createMachine({
           message: context.signingMessage!,
           allCommitments: context.allCommitments,
           signerIds: context.signerIds,
+          signingPackage: context.signingPackage || undefined,
+          randomizer: context.randomizer || undefined,
         }),
         onDone: {
           target: 'sendingShare',
@@ -497,16 +546,23 @@ export const participantMachine = createMachine({
       invoke: {
         id: 'sendShare',
         src: sendMessageActor,
-        input: ({ context }) => ({
-          sessionId: context.sessionId!,
-          message: createRound2SignatureShare(
-            context.sessionId!,
-            context.participantPubkey,
-            context.participantId,
-            context.signatureShare!.share
-          ),
-          recipients: [context.coordinatorPubkey!],
-        }),
+        input: ({ context }) => {
+          // Convert internal signature share to wire format (WasmSignatureShare)
+          const wasmShare: WasmSignatureShare = {
+            identifier: context.signatureShare!.participantId,
+            share: context.signatureShare!.share,
+          };
+          return {
+            sessionId: context.sessionId!,
+            message: createRound2SignatureShare(
+              context.sessionId!,
+              context.participantPubkey,
+              context.messageId || context.nonceMessageId || '',
+              wasmShare
+            ),
+            recipients: [context.coordinatorPubkey!],
+          };
+        },
         onDone: { target: 'awaitResult' },
         onError: {
           target: 'failed',
@@ -576,6 +632,7 @@ export const participantMachine = createMachine({
             context.participantPubkey,
             context.abortReason ?? 'user_cancelled',
             context.error?.message ?? 'Participant aborted',
+            context.messageId || context.nonceMessageId || undefined,
             context.error?.details
           ),
           recipients: [context.coordinatorPubkey!],

@@ -2,13 +2,13 @@
  * FROST Protocol Message Types
  *
  * Production-ready message envelope and payload types for FROST signing ceremonies.
- * All state machines derive state by replaying this message log.
+ * These schemas match the exact wire format used in test-zcash-ceremony-live.ts.
  *
  * Design principles:
  * - Single source of truth = message log
  * - All messages use standard envelope format
  * - Strict validation at ingress
- * - No non-spec concepts (inviteCode, etc.)
+ * - message_id links all messages in a signing attempt
  */
 
 import type { BackendId } from '../lib/frost-backend/types';
@@ -59,68 +59,109 @@ export type MessageType =
   | 'ABORT';                    // either direction: abort with reason
 
 // =============================================================================
-// Message Payload Types
+// WASM Output Types (from frost-wasm / frost-zcash-wasm)
+// =============================================================================
+
+/**
+ * Commitment object as returned by WASM generate_round1_commitment().
+ */
+export interface WasmCommitment {
+  identifier: number;
+  commitment: string;  // JSON-encoded commitment data
+}
+
+/**
+ * Signature share object as returned by WASM generate_round2_signature().
+ */
+export interface WasmSignatureShare {
+  identifier: number;
+  share: string;  // hex-encoded signature share
+}
+
+// =============================================================================
+// Message Payload Types (Canonical Wire Format)
 // =============================================================================
 
 /**
  * SIGNING_PACKAGE payload.
  * Sent by coordinator to start a signing ceremony.
+ * Matches test-zcash-ceremony-live.ts wire format.
  */
 export interface SigningPackagePayload {
   /** FROST backend to use ('ed25519' | 'orchard-redpallas') */
   backendId: BackendId;
+  /** Unique identifier for this signing attempt - links all related messages */
+  message_id: string;
   /** Message to be signed (hex-encoded) */
-  message: string;
-  /** Participant identifiers selected for this signing round */
-  signerIds: number[];
-  /** Coordinator's pubkey for verification */
-  coordinatorPubkey: string;
+  message_to_sign: string;
+  /** Participant pubkeys selected for this signing round */
+  selected_signers: string[];
+  /** FROST participant identifiers corresponding to selected_signers */
+  signer_ids: number[];
 }
 
 /**
  * ROUND1_COMMITMENT payload.
  * Sent by each participant in Round 1.
+ * Matches test-zcash-ceremony-live.ts wire format.
  */
 export interface Round1CommitmentPayload {
-  /** Participant's identifier in the group */
-  participantId: number;
-  /** Hiding commitment D_i (hex-encoded, 64 chars) */
-  hiding: string;
-  /** Binding commitment E_i (hex-encoded, 64 chars) */
-  binding: string;
+  /** Must match message_id from SIGNING_PACKAGE */
+  message_id: string;
+  /** Sender's pubkey */
+  signer_id: string;
+  /** Commitment object from WASM (identifier + commitment data) */
+  commitment: WasmCommitment;
 }
 
 /**
  * COMMITMENTS_SET payload.
  * Sent by coordinator after collecting all Round 1 commitments.
+ * Matches test-zcash-ceremony-live.ts wire format.
  */
 export interface CommitmentsSetPayload {
-  /** All collected commitments from participating signers */
-  commitments: Round1CommitmentPayload[];
-  /** The message being signed (echoed for verification) */
-  message: string;
+  /** Must match message_id from SIGNING_PACKAGE */
+  message_id: string;
+  /** All collected commitments (array of WASM commitment objects) */
+  commitments: WasmCommitment[];
+  /** Signing package from backend.createSigningPackage() - required for Round 2 */
+  signing_package: string;
+  /** Randomizer from backend.createSigningPackage() - required for Orchard */
+  randomizer: string;
+  /** Group public key for verification */
+  group_public_key: string;
 }
 
 /**
  * ROUND2_SIGNATURE_SHARE payload.
  * Sent by each participant in Round 2.
+ * Matches test-zcash-ceremony-live.ts wire format.
  */
 export interface Round2SignatureSharePayload {
-  /** Participant's identifier in the group */
-  participantId: number;
-  /** Signature share z_i (hex-encoded, 64 chars) */
-  share: string;
+  /** Must match message_id from SIGNING_PACKAGE */
+  message_id: string;
+  /** Sender's pubkey */
+  signer_id: string;
+  /** Signature share object from WASM (identifier + share) */
+  share: WasmSignatureShare;
 }
 
 /**
  * SIGNATURE_RESULT payload.
  * Sent by coordinator after successfully aggregating signature.
+ * Matches test-zcash-ceremony-live.ts wire format.
  */
 export interface SignatureResultPayload {
-  /** Final aggregate signature (hex-encoded, 128 chars for Schnorr) */
+  /** Must match message_id from SIGNING_PACKAGE */
+  message_id: string;
+  /** Backend used for signing */
+  backendId: BackendId;
+  /** Final aggregate signature (hex-encoded) */
   signature: string;
-  /** The message that was signed */
-  message: string;
+  /** Group public key used for verification */
+  group_public_key: string;
+  /** Randomizer used (included for Orchard, optional for Ed25519) */
+  randomizer?: string;
   /** Whether signature verification passed */
   verified: boolean;
 }
@@ -130,6 +171,8 @@ export interface SignatureResultPayload {
  * Sent to abort a signing ceremony.
  */
 export interface AbortPayload {
+  /** Must match message_id from SIGNING_PACKAGE (if known) */
+  message_id?: string;
   /** Reason for abort */
   reason: AbortReason;
   /** Human-readable message */
@@ -149,10 +192,12 @@ export type AbortReason =
   | 'aggregation_failed'   // Signature aggregation failed
   | 'user_cancelled'       // User cancelled the operation
   | 'session_expired'      // frostd session expired
+  | 'backend_mismatch'     // backendId doesn't match loaded backend
+  | 'message_id_mismatch'  // message_id doesn't match current signing
   | 'protocol_error';      // Generic protocol error
 
 // =============================================================================
-// Type-safe Message Constructors
+// Type-safe Message Unions
 // =============================================================================
 
 /**
@@ -226,14 +271,17 @@ export function createSigningPackage(
   sessionId: string,
   fromPubkey: string,
   backendId: BackendId,
-  message: string,
+  messageId: string,
+  messageToSign: string,
+  selectedSigners: string[],
   signerIds: number[]
 ): MessageEnvelope<SigningPackagePayload> {
   return createMessage('SIGNING_PACKAGE', sessionId, fromPubkey, {
     backendId,
-    message,
-    signerIds,
-    coordinatorPubkey: fromPubkey,
+    message_id: messageId,
+    message_to_sign: messageToSign,
+    selected_signers: selectedSigners,
+    signer_ids: signerIds,
   });
 }
 
@@ -243,14 +291,13 @@ export function createSigningPackage(
 export function createRound1Commitment(
   sessionId: string,
   fromPubkey: string,
-  participantId: number,
-  hiding: string,
-  binding: string
+  messageId: string,
+  commitment: WasmCommitment
 ): MessageEnvelope<Round1CommitmentPayload> {
   return createMessage('ROUND1_COMMITMENT', sessionId, fromPubkey, {
-    participantId,
-    hiding,
-    binding,
+    message_id: messageId,
+    signer_id: fromPubkey,
+    commitment,
   });
 }
 
@@ -260,12 +307,18 @@ export function createRound1Commitment(
 export function createCommitmentsSet(
   sessionId: string,
   fromPubkey: string,
-  commitments: Round1CommitmentPayload[],
-  message: string
+  messageId: string,
+  commitments: WasmCommitment[],
+  signingPackage: string,
+  randomizer: string,
+  groupPublicKey: string
 ): MessageEnvelope<CommitmentsSetPayload> {
   return createMessage('COMMITMENTS_SET', sessionId, fromPubkey, {
+    message_id: messageId,
     commitments,
-    message,
+    signing_package: signingPackage,
+    randomizer,
+    group_public_key: groupPublicKey,
   });
 }
 
@@ -275,11 +328,12 @@ export function createCommitmentsSet(
 export function createRound2SignatureShare(
   sessionId: string,
   fromPubkey: string,
-  participantId: number,
-  share: string
+  messageId: string,
+  share: WasmSignatureShare
 ): MessageEnvelope<Round2SignatureSharePayload> {
   return createMessage('ROUND2_SIGNATURE_SHARE', sessionId, fromPubkey, {
-    participantId,
+    message_id: messageId,
+    signer_id: fromPubkey,
     share,
   });
 }
@@ -290,13 +344,19 @@ export function createRound2SignatureShare(
 export function createSignatureResult(
   sessionId: string,
   fromPubkey: string,
+  messageId: string,
+  backendId: BackendId,
   signature: string,
-  message: string,
-  verified: boolean
+  groupPublicKey: string,
+  verified: boolean,
+  randomizer?: string
 ): MessageEnvelope<SignatureResultPayload> {
   return createMessage('SIGNATURE_RESULT', sessionId, fromPubkey, {
+    message_id: messageId,
+    backendId,
     signature,
-    message,
+    group_public_key: groupPublicKey,
+    randomizer,
     verified,
   });
 }
@@ -309,9 +369,11 @@ export function createAbort(
   fromPubkey: string,
   reason: AbortReason,
   message: string,
+  messageId?: string,
   details?: Record<string, unknown>
 ): MessageEnvelope<AbortPayload> {
   return createMessage('ABORT', sessionId, fromPubkey, {
+    message_id: messageId,
     reason,
     message,
     details,

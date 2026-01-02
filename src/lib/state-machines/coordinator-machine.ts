@@ -14,9 +14,8 @@
 import { createMachine, assign, fromPromise, type ActorRefFrom } from 'xstate';
 import type {
   FrostMessage,
-  Round1CommitmentPayload,
-  Round2SignatureSharePayload,
   AbortReason,
+  BackendId,
 } from '@/types/messages';
 import {
   createCommitmentsSet,
@@ -30,6 +29,29 @@ import {
 } from './validation';
 
 // =============================================================================
+// Internal Types (separate from wire format)
+// =============================================================================
+
+/**
+ * Internal commitment format stored in coordinator context.
+ * This is separate from the wire format (WasmCommitment).
+ */
+export interface InternalCommitment {
+  participantId: number;
+  hiding: string;
+  binding: string;
+}
+
+/**
+ * Internal signature share format stored in coordinator context.
+ * This is separate from the wire format (WasmSignatureShare).
+ */
+export interface InternalSignatureShare {
+  participantId: number;
+  share: string;
+}
+
+// =============================================================================
 // Types
 // =============================================================================
 
@@ -40,10 +62,11 @@ export interface CoordinatorContext {
   maxParticipants: number;
   participantPubkeys: string[];
   message: string | null;
+  messageId: string | null;  // Unique ID for current signing attempt
   selectedSignerIds: number[];
   messageLog: FrostMessage[];
-  commitments: Map<number, Round1CommitmentPayload>;
-  signatureShares: Map<number, Round2SignatureSharePayload>;
+  commitments: Map<number, InternalCommitment>;
+  signatureShares: Map<number, InternalSignatureShare>;
   aggregateSignature: string | null;
   verified: boolean;
   error: CoordinatorError | null;
@@ -54,6 +77,12 @@ export interface CoordinatorContext {
   round2TimeoutMs: number;
   sessionTimeoutMs: number;
   phase: ProtocolPhase;
+  // New fields for canonical wire format
+  backendId: BackendId;            // FROST backend to use
+  signingPackage: string | null;   // From backend.createSigningPackage()
+  randomizer: string | null;       // From backend.createSigningPackage()
+  groupPublicKey: string | null;   // From key generation
+  publicKeyPackage: string | null; // From key generation
 }
 
 export interface CoordinatorError {
@@ -93,6 +122,7 @@ export function createInitialCoordinatorContext(
     round1TimeoutMs?: number;
     round2TimeoutMs?: number;
     sessionTimeoutMs?: number;
+    backendId?: BackendId;
   } = {}
 ): CoordinatorContext {
   return {
@@ -102,6 +132,7 @@ export function createInitialCoordinatorContext(
     maxParticipants: 3,
     participantPubkeys: [],
     message: null,
+    messageId: null,
     selectedSignerIds: [],
     messageLog: [],
     commitments: new Map(),
@@ -116,6 +147,11 @@ export function createInitialCoordinatorContext(
     round2TimeoutMs: options.round2TimeoutMs ?? 120000,
     sessionTimeoutMs: options.sessionTimeoutMs ?? 600000,
     phase: 'idle',
+    backendId: options.backendId ?? 'ed25519',
+    signingPackage: null,
+    randomizer: null,
+    groupPublicKey: null,
+    publicKeyPackage: null,
   };
 }
 
@@ -141,8 +177,10 @@ export const aggregateSignatureActor = fromPromise<
   { signature: string; verified: boolean },
   {
     message: string;
-    commitments: Round1CommitmentPayload[];
-    shares: Round2SignatureSharePayload[];
+    commitments: InternalCommitment[];
+    shares: InternalSignatureShare[];
+    publicKeyPackage: string;
+    randomizer?: string;
   }
 >(async () => {
   throw new Error('aggregateSignatureActor must be provided via machine options');
@@ -229,6 +267,7 @@ export const coordinatorMachine = createMachine({
           actions: assign({
             message: ({ event }) => event.message,
             selectedSignerIds: ({ event }) => event.signerIds,
+            messageId: () => crypto.randomUUID(),  // Generate unique message_id for this signing attempt
             commitments: () => new Map(),
             signatureShares: () => new Map(),
             phase: () => 'round1' as ProtocolPhase,
@@ -289,16 +328,26 @@ export const coordinatorMachine = createMachine({
       invoke: {
         id: 'sendCommitmentsSet',
         src: sendMessageActor,
-        input: ({ context }) => ({
-          sessionId: context.sessionId!,
-          message: createCommitmentsSet(
-            context.sessionId!,
-            context.coordinatorPubkey,
-            Array.from(context.commitments.values()),
-            context.message!
-          ),
-          recipients: context.participantPubkeys,
-        }),
+        input: ({ context }) => {
+          // Convert internal commitments to WasmCommitment wire format
+          const wasmCommitments = Array.from(context.commitments.values()).map((c) => ({
+            identifier: c.participantId,
+            commitment: JSON.stringify({ hiding: c.hiding, binding: c.binding }),
+          }));
+          return {
+            sessionId: context.sessionId!,
+            message: createCommitmentsSet(
+              context.sessionId!,
+              context.coordinatorPubkey,
+              context.messageId!,  // Generated in UI_START_SIGNING
+              wasmCommitments,
+              context.signingPackage || '',  // Set by useSigning after calling backend.createSigningPackage()
+              context.randomizer || '',       // Set by useSigning after calling backend.createSigningPackage()
+              context.groupPublicKey || ''    // Set from stored group's publicKeyPackage
+            ),
+            recipients: context.participantPubkeys,
+          };
+        },
         onDone: { target: 'round2Collect' },
         onError: {
           target: 'failed',
@@ -371,6 +420,8 @@ export const coordinatorMachine = createMachine({
           message: context.message!,
           commitments: Array.from(context.commitments.values()),
           shares: Array.from(context.signatureShares.values()),
+          publicKeyPackage: context.publicKeyPackage || '',
+          randomizer: context.randomizer || undefined,
         }),
         onDone: {
           target: 'broadcasting',
@@ -401,9 +452,12 @@ export const coordinatorMachine = createMachine({
           message: createSignatureResult(
             context.sessionId!,
             context.coordinatorPubkey,
+            context.messageId!,  // Generated in UI_START_SIGNING
+            context.backendId,
             context.aggregateSignature!,
-            context.message!,
-            context.verified
+            context.groupPublicKey || '',
+            context.verified,
+            context.randomizer || undefined
           ),
           recipients: context.participantPubkeys,
         }),
@@ -428,6 +482,7 @@ export const coordinatorMachine = createMachine({
             context.coordinatorPubkey,
             context.abortReason ?? 'user_cancelled',
             context.error?.message ?? 'Ceremony aborted',
+            context.messageId || undefined,
             context.error?.details
           ),
           recipients: context.participantPubkeys,

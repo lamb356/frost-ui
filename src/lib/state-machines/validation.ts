@@ -10,7 +10,9 @@
  * 3. Monotonicity (reject Round2 before Round1)
  * 4. Freshness (reject if too old or from future)
  * 5. Session binding (reject if sid mismatch)
- * 6. Payload-specific validation
+ * 6. message_id linkage (all messages in signing attempt must match)
+ * 7. Backend-specific validation (randomizer required for Orchard)
+ * 8. Payload-specific validation
  */
 
 import {
@@ -23,8 +25,10 @@ import {
   type CommitmentsSetPayload,
   type SignatureResultPayload,
   type AbortPayload,
+  type WasmCommitment,
+  type WasmSignatureShare,
+  type BackendId,
   PROTOCOL_VERSION,
-  isMessageType,
 } from '@/types/messages';
 
 // =============================================================================
@@ -87,10 +91,13 @@ export type ValidationErrorCode =
   | 'MESSAGE_TOO_OLD'        // Message timestamp too old
   | 'MESSAGE_FROM_FUTURE'    // Message timestamp in future
   | 'SESSION_MISMATCH'       // Message for different session
+  | 'MESSAGE_ID_MISMATCH'    // message_id doesn't match current signing
   | 'DUPLICATE_MESSAGE'      // Message already processed
   | 'INVALID_PAYLOAD'        // Payload validation failed
   | 'INVALID_COMMITMENT'     // Commitment data invalid
   | 'INVALID_SHARE'          // Signature share invalid
+  | 'INVALID_BACKEND'        // Invalid or mismatched backend
+  | 'MISSING_RANDOMIZER'     // Randomizer required but missing
   | 'MONOTONICITY_VIOLATION' // Out of order message
   | 'NONCE_REUSE';           // Nonce reuse detected
 
@@ -413,9 +420,98 @@ export function validateSessionBinding(
   return null; // Valid
 }
 
+/**
+ * Validate message_id linkage.
+ */
+export function validateMessageIdLinkage(
+  payloadMessageId: string,
+  expectedMessageId: string
+): ValidationError | null {
+  if (payloadMessageId !== expectedMessageId) {
+    return {
+      code: 'MESSAGE_ID_MISMATCH',
+      message: 'message_id does not match current signing attempt',
+      details: { received: payloadMessageId, expected: expectedMessageId },
+    };
+  }
+  return null;
+}
+
 // =============================================================================
 // Payload-Specific Validation
 // =============================================================================
+
+/**
+ * Valid backend IDs.
+ */
+const VALID_BACKENDS: BackendId[] = ['ed25519', 'orchard-redpallas'];
+
+/**
+ * Validate backend ID.
+ */
+function isValidBackendId(id: unknown): id is BackendId {
+  return typeof id === 'string' && VALID_BACKENDS.includes(id as BackendId);
+}
+
+/**
+ * Validate a WASM commitment object.
+ */
+function validateWasmCommitment(commitment: unknown): ValidationError | null {
+  if (!commitment || typeof commitment !== 'object') {
+    return {
+      code: 'INVALID_COMMITMENT',
+      message: 'Commitment must be an object',
+    };
+  }
+
+  const c = commitment as WasmCommitment;
+
+  if (!Number.isInteger(c.identifier) || c.identifier <= 0) {
+    return {
+      code: 'INVALID_COMMITMENT',
+      message: 'Commitment identifier must be a positive integer',
+    };
+  }
+
+  if (typeof c.commitment !== 'string' || c.commitment.length === 0) {
+    return {
+      code: 'INVALID_COMMITMENT',
+      message: 'Commitment data must be a non-empty string',
+    };
+  }
+
+  return null;
+}
+
+/**
+ * Validate a WASM signature share object.
+ */
+function validateWasmSignatureShare(share: unknown): ValidationError | null {
+  if (!share || typeof share !== 'object') {
+    return {
+      code: 'INVALID_SHARE',
+      message: 'Signature share must be an object',
+    };
+  }
+
+  const s = share as WasmSignatureShare;
+
+  if (!Number.isInteger(s.identifier) || s.identifier <= 0) {
+    return {
+      code: 'INVALID_SHARE',
+      message: 'Share identifier must be a positive integer',
+    };
+  }
+
+  if (typeof s.share !== 'string' || s.share.length === 0) {
+    return {
+      code: 'INVALID_SHARE',
+      message: 'Share data must be a non-empty string',
+    };
+  }
+
+  return null;
+}
 
 /**
  * Validate SIGNING_PACKAGE payload.
@@ -425,31 +521,65 @@ export function validateSigningPackage(
 ): ValidationError | null {
   const p = payload as SigningPackagePayload;
 
-  if (typeof p.message !== 'string' || !isValidHex(p.message)) {
+  // backendId
+  if (!isValidBackendId(p.backendId)) {
     return {
-      code: 'INVALID_PAYLOAD',
-      message: 'Signing package message must be valid hex',
+      code: 'INVALID_BACKEND',
+      message: `Invalid backend ID: ${p.backendId}`,
     };
   }
 
-  if (!Array.isArray(p.signerIds) || p.signerIds.length === 0) {
+  // message_id
+  if (typeof p.message_id !== 'string' || !isValidUUID(p.message_id)) {
     return {
       code: 'INVALID_PAYLOAD',
-      message: 'Signing package must have at least one signer',
+      message: 'message_id must be a valid UUID',
     };
   }
 
-  if (!p.signerIds.every((id) => Number.isInteger(id) && id > 0)) {
+  // message_to_sign
+  if (typeof p.message_to_sign !== 'string' || !isValidHex(p.message_to_sign)) {
     return {
       code: 'INVALID_PAYLOAD',
-      message: 'Signer IDs must be positive integers',
+      message: 'message_to_sign must be valid hex',
     };
   }
 
-  if (typeof p.coordinatorPubkey !== 'string' || !isValidHexPubkey(p.coordinatorPubkey)) {
+  // selected_signers
+  if (!Array.isArray(p.selected_signers) || p.selected_signers.length === 0) {
     return {
       code: 'INVALID_PAYLOAD',
-      message: 'Coordinator public key must be 64 hex characters',
+      message: 'selected_signers must be a non-empty array',
+    };
+  }
+
+  if (!p.selected_signers.every((s) => typeof s === 'string' && isValidHexPubkey(s))) {
+    return {
+      code: 'INVALID_PAYLOAD',
+      message: 'All selected_signers must be valid 64-char hex pubkeys',
+    };
+  }
+
+  // signer_ids
+  if (!Array.isArray(p.signer_ids) || p.signer_ids.length === 0) {
+    return {
+      code: 'INVALID_PAYLOAD',
+      message: 'signer_ids must be a non-empty array',
+    };
+  }
+
+  if (!p.signer_ids.every((id) => Number.isInteger(id) && id > 0)) {
+    return {
+      code: 'INVALID_PAYLOAD',
+      message: 'All signer_ids must be positive integers',
+    };
+  }
+
+  // Verify arrays have same length
+  if (p.selected_signers.length !== p.signer_ids.length) {
+    return {
+      code: 'INVALID_PAYLOAD',
+      message: 'selected_signers and signer_ids must have same length',
     };
   }
 
@@ -460,37 +590,36 @@ export function validateSigningPackage(
  * Validate ROUND1_COMMITMENT payload.
  */
 export function validateRound1Commitment(
-  payload: unknown
+  payload: unknown,
+  expectedMessageId?: string
 ): ValidationError | null {
   const p = payload as Round1CommitmentPayload;
 
-  if (!Number.isInteger(p.participantId) || p.participantId <= 0) {
+  // message_id
+  if (typeof p.message_id !== 'string' || !isValidUUID(p.message_id)) {
     return {
-      code: 'INVALID_COMMITMENT',
-      message: 'Participant ID must be a positive integer',
+      code: 'INVALID_PAYLOAD',
+      message: 'message_id must be a valid UUID',
     };
   }
 
-  if (typeof p.hiding !== 'string' || p.hiding.length !== HEX_32_BYTES) {
+  // Check message_id linkage if expected
+  if (expectedMessageId) {
+    const linkageError = validateMessageIdLinkage(p.message_id, expectedMessageId);
+    if (linkageError) return linkageError;
+  }
+
+  // signer_id
+  if (typeof p.signer_id !== 'string' || !isValidHexPubkey(p.signer_id)) {
     return {
-      code: 'INVALID_COMMITMENT',
-      message: 'Hiding commitment must be 64 hex characters',
+      code: 'INVALID_PAYLOAD',
+      message: 'signer_id must be a valid 64-char hex pubkey',
     };
   }
 
-  if (typeof p.binding !== 'string' || p.binding.length !== HEX_32_BYTES) {
-    return {
-      code: 'INVALID_COMMITMENT',
-      message: 'Binding commitment must be 64 hex characters',
-    };
-  }
-
-  if (!isValidHex(p.hiding) || !isValidHex(p.binding)) {
-    return {
-      code: 'INVALID_COMMITMENT',
-      message: 'Commitments must be valid hex strings',
-    };
-  }
+  // commitment (WASM object)
+  const commitmentError = validateWasmCommitment(p.commitment);
+  if (commitmentError) return commitmentError;
 
   return null;
 }
@@ -499,39 +628,81 @@ export function validateRound1Commitment(
  * Validate COMMITMENTS_SET payload.
  */
 export function validateCommitmentsSet(
-  payload: unknown
+  payload: unknown,
+  expectedMessageId?: string,
+  expectedBackend?: BackendId
 ): ValidationError | null {
   const p = payload as CommitmentsSetPayload;
 
+  // message_id
+  if (typeof p.message_id !== 'string' || !isValidUUID(p.message_id)) {
+    return {
+      code: 'INVALID_PAYLOAD',
+      message: 'message_id must be a valid UUID',
+    };
+  }
+
+  // Check message_id linkage if expected
+  if (expectedMessageId) {
+    const linkageError = validateMessageIdLinkage(p.message_id, expectedMessageId);
+    if (linkageError) return linkageError;
+  }
+
+  // commitments array
   if (!Array.isArray(p.commitments) || p.commitments.length === 0) {
     return {
       code: 'INVALID_PAYLOAD',
-      message: 'Commitments set must contain at least one commitment',
+      message: 'commitments must be a non-empty array',
     };
   }
 
   // Validate each commitment
   for (const commitment of p.commitments) {
-    const error = validateRound1Commitment(commitment);
+    const error = validateWasmCommitment(commitment);
     if (error) return error;
   }
 
-  // Check for duplicate participant IDs
-  const participantIds = new Set<number>();
+  // Check for duplicate identifiers
+  const identifiers = new Set<number>();
   for (const c of p.commitments) {
-    if (participantIds.has(c.participantId)) {
+    if (identifiers.has(c.identifier)) {
       return {
         code: 'INVALID_PAYLOAD',
-        message: `Duplicate commitment for participant ${c.participantId}`,
+        message: `Duplicate commitment for identifier ${c.identifier}`,
       };
     }
-    participantIds.add(c.participantId);
+    identifiers.add(c.identifier);
   }
 
-  if (typeof p.message !== 'string' || !isValidHex(p.message)) {
+  // signing_package
+  if (typeof p.signing_package !== 'string' || p.signing_package.length === 0) {
     return {
       code: 'INVALID_PAYLOAD',
-      message: 'Message must be valid hex',
+      message: 'signing_package must be a non-empty string',
+    };
+  }
+
+  // randomizer (always required - even Ed25519 includes empty string)
+  if (typeof p.randomizer !== 'string') {
+    return {
+      code: 'INVALID_PAYLOAD',
+      message: 'randomizer must be a string',
+    };
+  }
+
+  // For Orchard, randomizer must not be empty
+  if (expectedBackend === 'orchard-redpallas' && p.randomizer.length === 0) {
+    return {
+      code: 'MISSING_RANDOMIZER',
+      message: 'randomizer is required for orchard-redpallas backend',
+    };
+  }
+
+  // group_public_key
+  if (typeof p.group_public_key !== 'string' || !isValidHex(p.group_public_key)) {
+    return {
+      code: 'INVALID_PAYLOAD',
+      message: 'group_public_key must be valid hex',
     };
   }
 
@@ -542,30 +713,36 @@ export function validateCommitmentsSet(
  * Validate ROUND2_SIGNATURE_SHARE payload.
  */
 export function validateRound2SignatureShare(
-  payload: unknown
+  payload: unknown,
+  expectedMessageId?: string
 ): ValidationError | null {
   const p = payload as Round2SignatureSharePayload;
 
-  if (!Number.isInteger(p.participantId) || p.participantId <= 0) {
+  // message_id
+  if (typeof p.message_id !== 'string' || !isValidUUID(p.message_id)) {
     return {
-      code: 'INVALID_SHARE',
-      message: 'Participant ID must be a positive integer',
+      code: 'INVALID_PAYLOAD',
+      message: 'message_id must be a valid UUID',
     };
   }
 
-  if (typeof p.share !== 'string' || p.share.length !== HEX_32_BYTES) {
+  // Check message_id linkage if expected
+  if (expectedMessageId) {
+    const linkageError = validateMessageIdLinkage(p.message_id, expectedMessageId);
+    if (linkageError) return linkageError;
+  }
+
+  // signer_id
+  if (typeof p.signer_id !== 'string' || !isValidHexPubkey(p.signer_id)) {
     return {
-      code: 'INVALID_SHARE',
-      message: 'Signature share must be 64 hex characters',
+      code: 'INVALID_PAYLOAD',
+      message: 'signer_id must be a valid 64-char hex pubkey',
     };
   }
 
-  if (!isValidHex(p.share)) {
-    return {
-      code: 'INVALID_SHARE',
-      message: 'Signature share must be valid hex',
-    };
-  }
+  // share (WASM object)
+  const shareError = validateWasmSignatureShare(p.share);
+  if (shareError) return shareError;
 
   return null;
 }
@@ -574,35 +751,70 @@ export function validateRound2SignatureShare(
  * Validate SIGNATURE_RESULT payload.
  */
 export function validateSignatureResult(
-  payload: unknown
+  payload: unknown,
+  expectedMessageId?: string
 ): ValidationError | null {
   const p = payload as SignatureResultPayload;
 
-  if (typeof p.signature !== 'string' || p.signature.length !== HEX_64_BYTES) {
+  // message_id
+  if (typeof p.message_id !== 'string' || !isValidUUID(p.message_id)) {
     return {
       code: 'INVALID_PAYLOAD',
-      message: 'Signature must be 128 hex characters',
+      message: 'message_id must be a valid UUID',
     };
   }
 
-  if (!isValidHex(p.signature)) {
+  // Check message_id linkage if expected
+  if (expectedMessageId) {
+    const linkageError = validateMessageIdLinkage(p.message_id, expectedMessageId);
+    if (linkageError) return linkageError;
+  }
+
+  // backendId
+  if (!isValidBackendId(p.backendId)) {
     return {
-      code: 'INVALID_PAYLOAD',
-      message: 'Signature must be valid hex',
+      code: 'INVALID_BACKEND',
+      message: `Invalid backend ID: ${p.backendId}`,
     };
   }
 
-  if (typeof p.message !== 'string' || !isValidHex(p.message)) {
+  // signature - can be variable length depending on curve
+  if (typeof p.signature !== 'string' || !isValidHex(p.signature)) {
     return {
       code: 'INVALID_PAYLOAD',
-      message: 'Message must be valid hex',
+      message: 'signature must be valid hex',
     };
   }
 
+  // group_public_key
+  if (typeof p.group_public_key !== 'string' || !isValidHex(p.group_public_key)) {
+    return {
+      code: 'INVALID_PAYLOAD',
+      message: 'group_public_key must be valid hex',
+    };
+  }
+
+  // randomizer (optional for Ed25519, present for Orchard)
+  if (p.randomizer !== undefined && typeof p.randomizer !== 'string') {
+    return {
+      code: 'INVALID_PAYLOAD',
+      message: 'randomizer must be a string if present',
+    };
+  }
+
+  // For Orchard, randomizer should be present
+  if (p.backendId === 'orchard-redpallas' && (!p.randomizer || p.randomizer.length === 0)) {
+    return {
+      code: 'MISSING_RANDOMIZER',
+      message: 'randomizer is required for orchard-redpallas results',
+    };
+  }
+
+  // verified
   if (typeof p.verified !== 'boolean') {
     return {
       code: 'INVALID_PAYLOAD',
-      message: 'Verified must be a boolean',
+      message: 'verified must be a boolean',
     };
   }
 
@@ -623,6 +835,8 @@ export function validateAbort(payload: unknown): ValidationError | null {
     'aggregation_failed',
     'user_cancelled',
     'session_expired',
+    'backend_mismatch',
+    'message_id_mismatch',
     'protocol_error',
   ];
 
@@ -640,6 +854,14 @@ export function validateAbort(payload: unknown): ValidationError | null {
     };
   }
 
+  // message_id is optional in abort
+  if (p.message_id !== undefined && typeof p.message_id !== 'string') {
+    return {
+      code: 'INVALID_PAYLOAD',
+      message: 'message_id must be a string if present',
+    };
+  }
+
   return null;
 }
 
@@ -648,19 +870,25 @@ export function validateAbort(payload: unknown): ValidationError | null {
  */
 export function validatePayload(
   messageType: MessageType,
-  payload: unknown
+  payload: unknown,
+  options: {
+    expectedMessageId?: string;
+    expectedBackend?: BackendId;
+  } = {}
 ): ValidationError | null {
+  const { expectedMessageId, expectedBackend } = options;
+
   switch (messageType) {
     case 'SIGNING_PACKAGE':
       return validateSigningPackage(payload);
     case 'ROUND1_COMMITMENT':
-      return validateRound1Commitment(payload);
+      return validateRound1Commitment(payload, expectedMessageId);
     case 'COMMITMENTS_SET':
-      return validateCommitmentsSet(payload);
+      return validateCommitmentsSet(payload, expectedMessageId, expectedBackend);
     case 'ROUND2_SIGNATURE_SHARE':
-      return validateRound2SignatureShare(payload);
+      return validateRound2SignatureShare(payload, expectedMessageId);
     case 'SIGNATURE_RESULT':
-      return validateSignatureResult(payload);
+      return validateSignatureResult(payload, expectedMessageId);
     case 'ABORT':
       return validateAbort(payload);
     default:
@@ -682,6 +910,8 @@ export function validateMessage(
   data: unknown,
   options: {
     expectedSessionId?: string;
+    expectedMessageId?: string;
+    expectedBackend?: BackendId;
     currentPhase?: ProtocolPhase;
     dedupeSet?: DeduplicationSet;
     checkFreshness?: boolean;
@@ -689,6 +919,8 @@ export function validateMessage(
 ): ValidationResult {
   const {
     expectedSessionId,
+    expectedMessageId,
+    expectedBackend,
     currentPhase,
     dedupeSet,
     checkFreshness = true,
@@ -746,8 +978,11 @@ export function validateMessage(
     }
   }
 
-  // Step 6: Validate payload
-  const payloadError = validatePayload(msg.t, msg.payload);
+  // Step 6: Validate payload (including message_id linkage and backend checks)
+  const payloadError = validatePayload(msg.t, msg.payload, {
+    expectedMessageId,
+    expectedBackend,
+  });
   if (payloadError) {
     return { valid: false, error: payloadError };
   }
