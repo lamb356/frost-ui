@@ -1,0 +1,6 @@
+# Build artifacts
+target/
+pkg/
+
+# Windows build script (local use only)
+build.bat

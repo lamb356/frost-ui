@@ -1,0 +1,43 @@
+[package]
+name = "frost-zcash-wasm"
+version = "0.1.0"
+edition = "2021"
+description = "WASM bindings for FROST threshold signatures with Zcash RedPallas (Orchard)"
+license = "MIT OR Apache-2.0"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = ["console_error_panic_hook"]
+
+[dependencies]
+# RedDSA with FROST support - using git for frost-rerandomized 2.x compatibility
+# This provides RedPallas curve for Zcash Orchard
+reddsa = { git = "https://github.com/ZcashFoundation/reddsa", features = ["frost", "serde"] }
+
+# WASM bindings
+wasm-bindgen = "0.2"
+js-sys = "0.3"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Error handling in WASM
+console_error_panic_hook = { version = "0.1", optional = true }
+
+# Random number generation for WASM
+getrandom = { version = "0.2", features = ["js"] }
+rand = "0.8"
+rand_core = "0.6"
+
+# Hex encoding
+hex = "0.4"
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3"
+
+[profile.release]
+opt-level = "s"
+lto = true

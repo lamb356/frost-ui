@@ -34,7 +34,7 @@ jobs:
           # Skip type checking for WASM imports that may not exist yet
           NEXT_TELEMETRY_DISABLED: 1
 
-  # Job 2: Build WASM module
+  # Job 2: Build WASM modules (frost-wasm and xeddsa-wasm)
   build-wasm:
     name: Build WASM
     runs-on: ubuntu-latest
@@ -51,15 +51,37 @@ jobs:
       - name: Install wasm-pack
         run: cargo install wasm-pack
 
-      - name: Build WASM module
+      - name: Build FROST WASM module (Ed25519)
         working-directory: src/lib/frost-wasm
         run: wasm-pack build --target web --out-dir pkg
 
-      - name: Upload WASM artifacts
+      - name: Build XEdDSA WASM module
+        working-directory: src/lib/xeddsa-wasm
+        run: wasm-pack build --target web --out-dir pkg
+
+      - name: Build FROST Zcash WASM module (RedPallas)
+        working-directory: src/lib/frost-zcash-wasm
+        run: wasm-pack build --target web --out-dir pkg
+
+      - name: Upload FROST WASM artifacts
         uses: actions/upload-artifact@v4
         with:
           name: frost-wasm-pkg
           path: src/lib/frost-wasm/pkg/
+          retention-days: 30
+
+      - name: Upload XEdDSA WASM artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: xeddsa-wasm-pkg
+          path: src/lib/xeddsa-wasm/pkg/
+          retention-days: 30
+
+      - name: Upload FROST Zcash WASM artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: frost-zcash-wasm-pkg
+          path: src/lib/frost-zcash-wasm/pkg/
           retention-days: 30
 
   # Job 3: Commit WASM artifacts back to repo (only on main branch push)
@@ -75,17 +97,31 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Download WASM artifacts
+      - name: Download FROST WASM artifacts
         uses: actions/download-artifact@v4
         with:
           name: frost-wasm-pkg
           path: src/lib/frost-wasm/pkg/
+
+      - name: Download XEdDSA WASM artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: xeddsa-wasm-pkg
+          path: src/lib/xeddsa-wasm/pkg/
+
+      - name: Download FROST Zcash WASM artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: frost-zcash-wasm-pkg
+          path: src/lib/frost-zcash-wasm/pkg/
 
       - name: Check for changes
         id: check_changes
         run: |
           # Force add even if in .gitignore (we want CI to commit WASM builds)
           git add --force src/lib/frost-wasm/pkg/
+          git add --force src/lib/xeddsa-wasm/pkg/
+          git add --force src/lib/frost-zcash-wasm/pkg/
           if git diff --staged --quiet; then
             echo "has_changes=false" >> $GITHUB_OUTPUT
           else
