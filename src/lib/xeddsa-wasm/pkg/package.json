@@ -1,0 +1,15 @@
+{
+  "name": "xeddsa_wasm",
+  "type": "module",
+  "version": "0.1.0",
+  "files": [
+    "xeddsa_wasm_bg.wasm",
+    "xeddsa_wasm.js",
+    "xeddsa_wasm.d.ts"
+  ],
+  "main": "xeddsa_wasm.js",
+  "types": "xeddsa_wasm.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}

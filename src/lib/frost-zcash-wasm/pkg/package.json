@@ -1,0 +1,17 @@
+{
+  "name": "frost-zcash-wasm",
+  "type": "module",
+  "description": "WASM bindings for FROST threshold signatures with Zcash RedPallas (Orchard)",
+  "version": "0.1.0",
+  "license": "MIT OR Apache-2.0",
+  "files": [
+    "frost_zcash_wasm_bg.wasm",
+    "frost_zcash_wasm.js",
+    "frost_zcash_wasm.d.ts"
+  ],
+  "main": "frost_zcash_wasm.js",
+  "types": "frost_zcash_wasm.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}
