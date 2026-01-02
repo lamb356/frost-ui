@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useMemo } from 'react';
+import { useEffect, useState } from 'react';
 import { useFrostStore } from '@/lib/store';
 import { FrostClient, MockFrostClient } from '@/lib/frost-client';
 
@@ -20,25 +20,25 @@ export function useClient(): UnifiedClient | null {
   const accessToken = useFrostStore((state) => state.accessToken);
   const tokenExpiresAt = useFrostStore((state) => state.tokenExpiresAt);
 
-  const clientRef = useRef<UnifiedClient | null>(null);
+  const [client, setClient] = useState<UnifiedClient | null>(null);
 
   // Create or update client when dependencies change
-  useMemo(() => {
+  useEffect(() => {
     if (demoMode) {
       // Create mock client
       const mockClient = new MockFrostClient({ baseUrl: frostdUrl });
-      clientRef.current = mockClient;
+      setClient(mockClient);
     } else {
       // Create real client
       const realClient = new FrostClient({ baseUrl: frostdUrl });
       if (accessToken) {
         realClient.setAccessToken(accessToken, tokenExpiresAt ?? undefined);
       }
-      clientRef.current = realClient;
+      setClient(realClient);
     }
   }, [demoMode, frostdUrl, accessToken, tokenExpiresAt]);
 
-  return clientRef.current;
+  return client;
 }
 
 /**

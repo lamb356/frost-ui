@@ -49,6 +49,7 @@ export interface LoginResponse {
  * POST /logout - Invalidate access token
  * Empty request body
  */
+// eslint-disable-next-line @typescript-eslint/no-empty-object-type
 export interface LogoutResponse {
   // Empty response on success
 }
@@ -106,6 +107,7 @@ export interface CloseSessionRequest {
   session_id: SessionId;
 }
 
+// eslint-disable-next-line @typescript-eslint/no-empty-object-type
 export interface CloseSessionResponse {
   // Empty response on success
 }
@@ -127,6 +129,7 @@ export interface SendRequest {
   msg: string;
 }
 
+// eslint-disable-next-line @typescript-eslint/no-empty-object-type
 export interface SendResponse {
   // Empty response on success
 }

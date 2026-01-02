@@ -268,20 +268,20 @@ export function useAuth(options: UseAuthOptions = {}): UseAuthResult {
  */
 export function useFrostClient(): FrostClient | null {
   const { frostdUrl, accessToken, tokenExpiresAt } = useFrostStore();
-  const clientRef = useRef<FrostClient | null>(null);
+  const [client, setClient] = useState<FrostClient | null>(null);
 
   useEffect(() => {
     if (!accessToken) {
-      clientRef.current = null;
+      setClient(null);
       return;
     }
 
-    const client = new FrostClient({ baseUrl: frostdUrl });
-    client.setAccessToken(accessToken, tokenExpiresAt ?? undefined);
-    clientRef.current = client;
+    const newClient = new FrostClient({ baseUrl: frostdUrl });
+    newClient.setAccessToken(accessToken, tokenExpiresAt ?? undefined);
+    setClient(newClient);
   }, [frostdUrl, accessToken, tokenExpiresAt]);
 
-  return clientRef.current;
+  return client;
 }
 
 /**

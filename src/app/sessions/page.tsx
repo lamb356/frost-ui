@@ -3,22 +3,19 @@
 import Link from 'next/link';
 import { useFrostStore, type SessionHistoryEntry } from '@/lib/store';
 import { PageLoading } from '@/components/ui/loading';
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 
 export default function SessionsPage() {
   // Use individual selectors to avoid SSR hydration issues with object references
   const sessionHistory = useFrostStore((state) => state.sessionHistory);
   const clearSessionHistory = useFrostStore((state) => state.clearSessionHistory);
   const removeSessionFromHistory = useFrostStore((state) => state.removeSessionFromHistory);
-  const [isHydrated, setIsHydrated] = useState(false);
   const [filter, setFilter] = useState<'all' | 'active' | 'completed' | 'cancelled'>('all');
 
-  // Wait for hydration
-  useEffect(() => {
-    setIsHydrated(true);
-  }, []);
+  // Check if we're on the client side for hydration
+  const isClient = typeof window !== 'undefined';
 
-  if (!isHydrated) {
+  if (!isClient) {
     return <PageLoading title="Loading Sessions" description="Please wait..." />;
   }
 

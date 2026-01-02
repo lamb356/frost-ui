@@ -78,29 +78,8 @@ export function EmptyState({
     </svg>
   );
 
-  const ActionButton = () => {
-    if (!action) return null;
-
-    const buttonClasses =
-      'inline-flex items-center gap-2 px-4 py-2 bg-amber-500 hover:bg-amber-400 text-gray-900 font-medium rounded-lg transition-colors';
-
-    if (action.href) {
-      return (
-        <Link href={action.href} className={buttonClasses}>
-          {action.label}
-          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7l5 5m0 0l-5 5m5-5H6" />
-          </svg>
-        </Link>
-      );
-    }
-
-    return (
-      <button onClick={action.onClick} className={buttonClasses}>
-        {action.label}
-      </button>
-    );
-  };
+  const buttonClasses =
+    'inline-flex items-center gap-2 px-4 py-2 bg-amber-500 hover:bg-amber-400 text-gray-900 font-medium rounded-lg transition-colors';
 
   return (
     <div className="flex flex-col items-center justify-center py-16 px-4">
@@ -109,7 +88,20 @@ export function EmptyState({
       </div>
       <h3 className="text-lg font-medium text-white mb-2">{title}</h3>
       <p className="text-gray-400 text-center max-w-md mb-6">{description}</p>
-      <ActionButton />
+      {action && (
+        action.href ? (
+          <Link href={action.href} className={buttonClasses}>
+            {action.label}
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7l5 5m0 0l-5 5m5-5H6" />
+            </svg>
+          </Link>
+        ) : (
+          <button onClick={action.onClick} className={buttonClasses}>
+            {action.label}
+          </button>
+        )
+      )}
     </div>
   );
 }
