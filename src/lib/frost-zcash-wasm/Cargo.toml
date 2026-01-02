@@ -14,7 +14,7 @@ default = ["console_error_panic_hook"]
 [dependencies]
 # RedDSA with FROST support - using git for frost-rerandomized 2.x compatibility
 # This provides RedPallas curve for Zcash Orchard
-reddsa = { git = "https://github.com/ZcashFoundation/reddsa", features = ["frost", "serde"] }
+reddsa = { git = "https://github.com/ZcashFoundation/reddsa", rev = "3f737fd4d8a341360c75243a24fea47edba9f4f0", features = ["frost", "serde"] }
 
 # WASM bindings
 wasm-bindgen = "0.2"

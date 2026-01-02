@@ -4,208 +4,105 @@ This document describes the integration of real FROST cryptographic operations v
 
 ## Production Readiness Summary
 
-| Component | Status | Notes |
-|-----------|--------|-------|
-| **XEdDSA Auth** | ✅ Production | Spec-compliant XEdDSA signatures (Signal Protocol) |
-| **Challenge Signing** | ✅ Production | Signs UUID as 16-byte binary per spec |
-| **X25519 Key Generation** | ✅ Production | Single keypair for auth + encryption |
-| **X25519 E2E Encryption** | ✅ Production | Real ECDH + AES-GCM for message encryption |
-| **Password Key Storage** | ✅ Production | PBKDF2 + AES-GCM for local key encryption |
-| **FROST WASM (Ed25519)** | ✅ Working | Uses frost-ed25519 for working WASM builds |
-| **FROST WASM (RedPallas)** | ⚠️ Future | Zcash Orchard requires frost-rerandomized API work |
-| **frostd Client** | ✅ Production | Matches official spec |
-| **State Machines** | ⚠️ Demo Only | Works but `inviteCode` is not in frostd spec |
+| Component | Status | Tests | Notes |
+|-----------|--------|-------|-------|
+| **XEdDSA Auth** | ✅ Production | 10 | Spec-compliant XEdDSA signatures (Signal Protocol) |
+| **FROST Ed25519** | ✅ Production | 33 | Full signing ceremony with E2E encryption |
+| **FROST RedPallas** | ✅ Production | 9 | Zcash Orchard compatible with rerandomization |
+| **State Machines** | ✅ Production | - | Message-log driven, validation, deduplication |
+| **E2E Encryption** | ✅ Production | - | X25519 ECDH + AES-256-GCM |
+| **frostd Client** | ✅ Production | - | Matches official spec |
 
-## What's Demo vs Production
+## WASM Modules
 
-### Production-Ready Components
+### 1. frost-wasm (Ed25519)
 
-These components use real cryptography and match the frostd specification:
+Standard FROST threshold signatures using Ed25519 curve.
 
-1. **Authentication Crypto** (`src/lib/crypto/index.ts`, `src/lib/crypto/xeddsa.ts`)
-   - XEdDSA signatures (spec-compliant with frostd)
-   - X25519 key generation (single keypair for auth + encryption)
-   - XEdDSA signing for /login challenge (UUID as 16-byte binary)
-   - Real X25519 ECDH key exchange for E2E encryption
-   - Real AES-256-GCM encryption with HKDF key derivation
-   - Real PBKDF2 password-based key derivation
+**Location:** `src/lib/frost-wasm/`
 
-2. **frostd REST Client** (`src/lib/frost-client/`)
-   - Implements all endpoints from the official spec
-   - /challenge, /login, /create_new_session, /list_sessions
-   - /get_session_info, /send, /receive, /close_session
-   - Proper polling-based message receiving
+**Features:**
+- Key generation with trusted dealer
+- Round 1 commitment generation
+- Round 2 signature share generation
+- Signature aggregation and verification
+- JSON serialization via serde
 
-### Demo-Only Components
+### 2. xeddsa-wasm (Authentication)
 
-These components work but need changes for production:
+XEdDSA signatures for frostd authentication.
 
-1. **State Machine `inviteCode`** (`src/lib/state-machines/`)
-   - The frostd spec does NOT have an invite code concept
-   - Sessions are identified by session_id only
-   - Participants join by knowing the session_id and being in the pubkeys list
+**Location:** `src/lib/xeddsa-wasm/`
 
-### Current: FROST WASM with Ed25519
+**Features:**
+- X25519 key generation
+- XEdDSA signing (allows X25519 keys to sign)
+- UUID binary signing (16-byte format per spec)
+- Verification
 
-The FROST WASM bindings currently use **frost-ed25519** for a working implementation:
+### 3. frost-zcash-wasm (RedPallas/Orchard)
 
-- **Curve:** Ed25519 (Curve25519 with SHA-512)
-- **Algorithm:** Standard FROST threshold signatures
-- **Compatibility:** Works with any Ed25519-compatible system
+FROST rerandomized signatures for Zcash Orchard.
 
-### Future: Zcash Orchard (RedPallas)
+**Location:** `src/lib/frost-zcash-wasm/`
 
-For Zcash Orchard compatibility, future work will migrate to **reddsa** with **frost-rerandomized**:
+**Features:**
+- RedPallas curve (Pallas with BLAKE2b-512)
+- Rerandomized FROST (ZIP-312)
+- Transaction unlinkability via randomizer
+- Full signing ceremony support
 
-- **Curve:** RedPallas (Pallas curve with BLAKE2b-512)
-- **Algorithm:** Rerandomized FROST for transaction privacy
-- **Status:** Blocked on frost-core 0.6+ API changes
+**Dependency:** Pinned to `reddsa` commit `3f737fd4d8a341360c75243a24fea47edba9f4f0`
 
-Key differences from standard FROST:
-- Requires a **Randomizer** for signing (provides transaction unlinkability)
-- frost-core 0.6+ has breaking API changes (no serialize/deserialize methods)
-- reddsa uses internal types not fully exposed via public API
+## Running Tests
 
-## XEdDSA Authentication (Spec-Compliant)
+### Ed25519 Full Ceremony (33 tests)
 
-This implementation uses **XEdDSA signatures** as required by the frostd specification. XEdDSA is from the Signal Protocol and allows using a single X25519 keypair for both ECDH encryption and digital signatures.
+Tests complete signing ceremony against live frostd server:
 
-### How It Works
+```bash
+# Start frostd first (in WSL with TLS certs)
+wsl bash -c "~/.cargo/bin/frostd --tls-cert localhost.pem --tls-key localhost-key.pem --ip 127.0.0.1 --port 2745 &"
 
-| Step | Description |
-|------|-------------|
-| **Key Generation** | Generate X25519 keypair (32-byte private key) |
-| **Public Key Derivation** | Derive Ed25519 public key via XEdDSA (sign bit = 0) |
-| **Signing** | Convert X25519 → Ed25519 internally, sign with randomized nonce |
-| **Verification** | frostd verifies using the Ed25519 public key |
-
-### Implementation Details
-
-```typescript
-// Generate X25519 keypair for both auth and encryption
-const keys = generateAuthKeyPair();
-// keys.privateKey = X25519 private key (hex)
-// keys.publicKey = XEdDSA-derived Ed25519 public key (hex)
-
-// Sign challenge with XEdDSA
-const signature = signChallenge(keys.privateKey, challengeUuid);
-// Internally: converts X25519 key to Ed25519, signs UUID as 16 bytes
+# Run test
+npx tsx scripts/test-ceremony.ts https://localhost:2745
 ```
 
-### XEdDSA vs Ed25519
+**Test Coverage:**
+- Keypair generation (3 participants)
+- Authentication with frostd (XEdDSA)
+- FROST key share generation (2-of-3)
+- Session creation
+- E2E encrypted message exchange
+- Round 1 commitments
+- Round 2 signature shares
+- Signature aggregation
+- Verification
 
-| Aspect | XEdDSA (Current) | Standard Ed25519 |
-|--------|------------------|------------------|
-| **Key Type** | X25519 private key | Ed25519 private key |
-| **Public Key** | Derived with sign bit 0 | Standard Ed25519 public key |
-| **Nonce** | Randomized (64 bytes) | Deterministic (RFC 8032) |
-| **Use Case** | Same key for ECDH + signing | Signing only |
+### Zcash RedPallas Ceremony (9 tests)
 
-### References
+Tests complete rerandomized signing locally:
 
-- [XEdDSA Specification (Signal)](https://signal.org/docs/specifications/xeddsa/)
-- [frostd Server Spec](https://frost.zfnd.org/zcash/server.html)
-
-## Challenge Signing (UUID Binary Format)
-
-The frostd `/challenge` endpoint returns a UUID (e.g., `550e8400-e29b-41d4-a716-446655440000`). Per the spec, this UUID must be signed as its **16-byte binary representation**, NOT as a UTF-8 string.
-
-### Binary vs String Format
-
-| Format | Bytes | Example |
-|--------|-------|---------|
-| UTF-8 String | 36 bytes | `"550e8400-e29b-41d4-a716-446655440000"` as ASCII |
-| Binary (Correct) | 16 bytes | `0x55 0x0e 0x84 0x00 0xe2 0x9b ...` |
-
-### Implementation
-
-```typescript
-// Convert UUID string to 16-byte binary
-function uuidToBytes(uuid: string): Uint8Array {
-  const hex = uuid.replace(/-/g, '');  // Remove hyphens
-  const bytes = new Uint8Array(16);
-  for (let i = 0; i < 16; i++) {
-    bytes[i] = parseInt(hex.substring(i * 2, i * 2 + 2), 16);
-  }
-  return bytes;
-}
-
-// Sign the 16-byte binary (spec-compliant)
-const challengeBytes = uuidToBytes(challenge);
-const signature = await ed.signAsync(challengeBytes, privateKey);
+```bash
+npx tsx scripts/test-zcash-ceremony.ts
 ```
 
-This ensures byte-level compatibility with frostd servers even if there are other signature scheme differences.
+**Test Coverage:**
+- Key generation (2-of-3)
+- Round 1 commitments
+- Signing package with randomizer (ZIP-312)
+- Round 2 signature shares
+- Aggregation
+- Verification
+- Randomization test (different randomizers = different valid signatures)
 
-## Curve Compatibility
+### XEdDSA Authentication (10 tests)
 
-### Current Implementation (Ed25519)
+Tests authentication against frostd:
 
-The WASM implementation currently uses **frost-ed25519** for working builds:
-
-```rust
-use frost_ed25519 as frost;
+```bash
+npx tsx scripts/test-frostd.ts https://localhost:2745
 ```
-
-This provides:
-- Standard FROST threshold signatures
-- Compatible with Ed25519 ecosystem
-- Simpler API with serde serialization
-
-### Future: Zcash Pool Support
-
-| Zcash Pool | Crate | Curve | Status |
-|------------|-------|-------|--------|
-| Orchard (NU5+) | `reddsa` + `frost-rerandomized` | RedPallas (Pallas curve) | ⚠️ Future work |
-| Sapling | `reddsa::frost::redjubjub` | RedJubjub (Jubjub curve) | ⚠️ Future work |
-| Transparent | `frost-secp256k1` | secp256k1 | Not planned |
-
-### Migration Path to Zcash Curves
-
-To migrate from Ed25519 to RedPallas:
-
-1. Update Cargo.toml to use `reddsa` with `frost` feature
-2. Rewrite lib.rs for frost-rerandomized API (significant changes in 0.6+)
-3. Add Randomizer support for rerandomized FROST
-4. Handle API differences (no serialize/deserialize on many types)
-
-The frost-core 0.6+ API is significantly different:
-- KeyPackage, PublicKeyPackage don't have serialize/deserialize
-- Nonce, NonceCommitment types moved
-- RandomizedParams is private
-- Type mismatches (expects `[u8; 32]` not `&Vec<u8>`)
-
-## Milestones to Production
-
-### Phase 1: Authentication & Encryption ✅
-- [x] XEdDSA authentication crypto (PRODUCTION)
-- [x] X25519 E2E encryption (PRODUCTION)
-- [x] frostd REST client matching spec (PRODUCTION)
-- [x] State machines for ceremony flow (DEMO)
-- [x] Mock client for offline development
-
-### Phase 2: Working FROST WASM ✅
-- [x] Implement frost-ed25519 WASM bindings
-- [x] Use serde for JSON serialization (works with frost-ed25519 2.0)
-- [x] Full signing flow: keygen → round1 → round2 → aggregate → verify
-- [x] CI/CD builds on Linux (GitHub Actions)
-
-### Phase 3: Zcash Curve Support (Future)
-- [ ] Research frost-core 0.6+ API changes
-- [ ] Implement custom serialization for KeyPackage/PublicKeyPackage
-- [ ] Update to reddsa with frost-rerandomized
-- [ ] Add Randomizer support for rerandomized FROST
-- [ ] Verify signature compatibility with Zcash nodes
-
-### Phase 4: Spec Compliance
-- [ ] Remove inviteCode from state machines
-- [ ] Implement proper Ed25519 -> X25519 key conversion
-- [ ] Add real transaction parsing for Zcash
-
-### Phase 5: Production Hardening
-- [ ] Implement proper DKG (vs trusted dealer)
-- [ ] Add key resharing capability
-- [ ] Security audit of crypto code
 
 ## Architecture
 
@@ -213,120 +110,83 @@ The frost-core 0.6+ API is significantly different:
 ┌─────────────────────────────────────────────────────────────┐
 │                     Next.js Application                      │
 ├─────────────────────────────────────────────────────────────┤
-│  Crypto Module (src/lib/crypto/) - PRODUCTION               │
-│  ├── XEdDSA signing via custom implementation               │
+│  State Machines (src/lib/state-machines/)                    │
+│  ├── coordinator-machine.ts - Manages signing ceremonies     │
+│  ├── participant-machine.ts - Participant state management   │
+│  └── validation.ts - Message validation, deduplication       │
+├─────────────────────────────────────────────────────────────┤
+│  Crypto Module (src/lib/crypto/)                             │
+│  ├── XEdDSA signing via Rust WASM                           │
 │  ├── X25519 ECDH via @noble/curves                          │
 │  └── AES-GCM via WebCrypto API                              │
 ├─────────────────────────────────────────────────────────────┤
-│  TypeScript Loader (loader.ts)                              │
-│  ├── Dynamically loads WASM module                          │
-│  ├── Provides typed wrapper functions                       │
-│  └── Falls back to mock implementation if WASM unavailable  │
+│  WASM Modules                                                │
+│  ├── frost-wasm (Ed25519) - Standard FROST                  │
+│  ├── xeddsa-wasm - Authentication signatures                │
+│  └── frost-zcash-wasm (RedPallas) - Zcash Orchard           │
 ├─────────────────────────────────────────────────────────────┤
-│  WASM Module (frost_wasm.wasm) - Ed25519                    │
-│  └── Compiled from Rust with wasm-bindgen                   │
-│  └── Uses frost-ed25519 for standard FROST                  │
-├─────────────────────────────────────────────────────────────┤
-│  Rust Crate (frost-wasm)                                    │
-│  ├── frost-ed25519 - FROST with Ed25519 curve               │
-│  ├── wasm-bindgen - JS/WASM interop                         │
-│  └── serde_json - Data serialization                        │
+│  Message Types (src/types/messages.ts)                       │
+│  ├── Wire envelope format {v, sid, id, t, from, ts, payload}│
+│  ├── SIGNING_PACKAGE, ROUND1_COMMITMENT, COMMITMENTS_SET    │
+│  ├── ROUND2_SIGNATURE_SHARE, SIGNATURE_RESULT, ABORT        │
+│  └── Factory functions and serialization                     │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-## Exposed WASM Functions
+## State Machine Design
 
-The WASM module exposes these functions for Ed25519 FROST:
+State machines are message-log driven and production-ready:
 
-### `generate_key_shares(threshold, total)`
-
-Generates key shares using trusted dealer key generation.
-
-**Parameters:**
-- `threshold: u16` - Minimum signers required (t)
-- `total: u16` - Total participants (n)
-
-**Returns:** JSON containing:
-```typescript
-{
-  group_public_key: string,   // Hex-encoded group public key
-  public_key_package: string, // JSON-serialized (needed for aggregation)
-  shares: [{
-    identifier: number,
-    key_package: string,     // JSON-serialized (KEEP SECRET!)
-    verifying_share: string  // Hex-encoded
-  }],
-  threshold: number,
-  total: number
-}
+### Coordinator Machine States
+```
+Idle → CreatingSession → Waiting → Round1Collect → Round2Send
+     → Round2Collect → Aggregating → Broadcasting → Complete
 ```
 
-### `generate_round1_commitment(key_package_json)`
-
-Generates Round 1 commitment and nonces.
-
-**Parameters:**
-- `key_package_json: string` - Participant's key package (JSON, from KeyGenResult)
-
-**Returns:** JSON containing:
-```typescript
-{
-  commitment: {
-    identifier: number,
-    commitment: string   // JSON-serialized SigningCommitments (broadcast this)
-  },
-  nonces: {
-    identifier: number,
-    nonces: string       // JSON-serialized SigningNonces (KEEP SECRET!)
-  }
-}
+### Participant Machine States
+```
+Idle → Ready → AwaitSigning → Round1 → SendingCommitment
+     → AwaitCommitments → Confirm → Round2 → SendingShare
+     → AwaitResult → Complete
 ```
 
-### `generate_round2_signature(key_package, nonces, commitments, message)`
+### Key Features
+- Single source of truth = message log
+- Strict message validation at ingress
+- Deduplication via message ID tracking
+- Nonce reuse protection via nonceMessageId
+- Timeout handling (120s per round, 600s session)
 
-Generates Round 2 signature share.
+## E2E Encryption
 
-**Parameters:**
-- `key_package_json: string` - Key package (JSON)
-- `nonces_json: string` - JSON of SigningNonces wrapper from Round 1
-- `commitments_json: string` - JSON array of all Commitment objects
-- `message_hex: string` - Message to sign (hex)
+All messages between participants are E2E encrypted:
 
-**Returns:** JSON containing:
-```typescript
-{
-  identifier: number,
-  share: string  // JSON-serialized signature share
-}
-```
+1. **Key Exchange:** X25519 ECDH (ephemeral + recipient public key)
+2. **Key Derivation:** HKDF-SHA256 with "frost-e2e" info
+3. **Encryption:** AES-256-GCM with 12-byte nonce
+4. **Message Format:** `{ephemeralPubkey, nonce, ciphertext}` (hex-encoded)
 
-### `aggregate_signature(shares, commitments, message, public_key_package)`
+The frostd server cannot read message contents.
 
-Aggregates signature shares into final signature.
+## XEdDSA Authentication
 
-**Parameters:**
-- `shares_json: string` - JSON array of SignatureShare objects
-- `commitments_json: string` - JSON array of Commitment objects
-- `message_hex: string` - Signed message (hex)
-- `public_key_package_json: string` - PublicKeyPackage (JSON, from KeyGenResult)
+Authentication uses XEdDSA (Signal Protocol) to allow a single X25519 keypair for both ECDH and signing:
 
-**Returns:** JSON containing:
-```typescript
-{
-  signature: string  // Hex-encoded signature (64 bytes)
-}
-```
+| Step | Description |
+|------|-------------|
+| **Key Generation** | Generate X25519 keypair (32-byte private key) |
+| **Public Key Derivation** | Derive Ed25519 public key via XEdDSA (sign bit = 0) |
+| **Challenge Signing** | Sign UUID as 16-byte binary (not 36-byte string) |
+| **Verification** | frostd verifies using the Ed25519 public key |
 
-### `verify_signature(signature, message, group_public_key)`
+## Challenge Signing (UUID Binary Format)
 
-Verifies an Ed25519 FROST signature.
+The frostd `/challenge` endpoint returns a UUID. Per spec, sign as **16-byte binary**:
 
-**Parameters:**
-- `signature_hex: string` - Signature (hex, 64 bytes)
-- `message_hex: string` - Signed message (hex)
-- `group_public_key_hex: string` - Group public key (hex, 32 bytes)
-
-**Returns:** `{ "valid": true/false }`
+| Format | Bytes | Example |
+|--------|-------|---------|
+| UTF-8 String | 36 bytes | `"550e8400-e29b-41d4-a716-446655440000"` |
+| Binary (Correct) | 16 bytes | `0x55 0x0e 0x84 0x00 0xe2 0x9b ...` |
 
 ## Build Instructions
 
@@ -336,220 +196,142 @@ Verifies an Ed25519 FROST signature.
 2. **wasm-pack**: `cargo install wasm-pack`
 3. **wasm32-unknown-unknown target**: `rustup target add wasm32-unknown-unknown`
 
-### Building on Linux/macOS
+### Building All WASM Modules
 
 ```bash
+# frost-wasm (Ed25519)
 cd src/lib/frost-wasm
+wasm-pack build --target web --out-dir pkg
+
+# xeddsa-wasm (Authentication)
+cd src/lib/xeddsa-wasm
+wasm-pack build --target web --out-dir pkg
+
+# frost-zcash-wasm (RedPallas)
+cd src/lib/frost-zcash-wasm
 wasm-pack build --target web --out-dir pkg
 ```
 
-### Building on Windows
+### CI/CD
 
-Windows builds require Visual Studio Build Tools with the C++ workload installed.
+GitHub Actions builds all three WASM modules on Linux and commits the built artifacts.
 
-**Option 1: Use Visual Studio Developer Command Prompt**
+## Zcash Curve Support
 
-1. Open "Developer Command Prompt for VS 2022"
-2. Navigate to `src/lib/frost-wasm`
-3. Run: `wasm-pack build --target web --out-dir pkg`
+| Zcash Pool | Crate | Curve | Status |
+|------------|-------|-------|--------|
+| Orchard (NU5+) | `reddsa` + `frost-rerandomized` | RedPallas | ✅ Implemented |
+| Sapling | `reddsa::frost::redjubjub` | RedJubjub | Future work |
+| Transparent | `frost-secp256k1` | secp256k1 | Not planned |
 
-**Option 2: Fix PATH conflict with Git**
+## API Reference
 
-If you have Git installed, its `link.exe` may shadow MSVC's linker. Solutions:
+### frost-zcash-wasm (RedPallas)
 
-1. Temporarily remove Git from PATH:
-   ```powershell
-   $env:PATH = ($env:PATH -split ';' | Where-Object { $_ -notlike '*Git*' }) -join ';'
-   wasm-pack build --target web --out-dir pkg
-   ```
+#### `generate_key_shares(threshold, total)`
 
-2. Or use the cargo config (already created at `.cargo/config.toml`):
-   - Ensure the linker path is correct for your VS version
-   - Set `LIB` environment variable to include Windows SDK libs
+Generates key shares using trusted dealer.
 
-**Option 3: Use Docker**
-
-```dockerfile
-FROM rust:latest
-RUN cargo install wasm-pack
-RUN rustup target add wasm32-unknown-unknown
-WORKDIR /app
-COPY . .
-RUN wasm-pack build --target web --out-dir pkg
-```
-
-### Build Output
-
-After successful build, `pkg/` will contain:
-- `frost_wasm.js` - JavaScript glue code
-- `frost_wasm.d.ts` - TypeScript definitions
-- `frost_wasm_bg.wasm` - WebAssembly binary
-- `package.json` - npm package metadata
-
-## Integration with Next.js
-
-### Using the TypeScript Loader
-
+**Returns:**
 ```typescript
-import { getFrostOperations } from '@/lib/frost-wasm/loader';
-
-async function signMessage() {
-  const frost = await getFrostOperations();
-
-  // frost.isRealCrypto tells you if using WASM or mock
-  console.log('Using real FROST:', frost.isRealCrypto);
-
-  // Generate keys (2-of-3)
-  const keys = await frost.generateKeyShares(2, 3);
-
-  // Round 1: Generate commitments
-  const r1_1 = await frost.generateRound1Commitment(
-    keys.shares[0].signing_share,
-    1
-  );
-  const r1_2 = await frost.generateRound1Commitment(
-    keys.shares[1].signing_share,
-    2
-  );
-
-  const commitments = [r1_1.commitment, r1_2.commitment];
-  const message = '48656c6c6f'; // "Hello" in hex
-
-  // Round 2: Generate signature shares
-  const sig1 = await frost.generateRound2Signature(
-    keys.shares[0].signing_share,
-    r1_1.nonces,
-    commitments,
-    message,
-    1
-  );
-  const sig2 = await frost.generateRound2Signature(
-    keys.shares[1].signing_share,
-    r1_2.nonces,
-    commitments,
-    message,
-    2
-  );
-
-  // Aggregate
-  const signature = await frost.aggregateSignature(
-    [sig1, sig2],
-    commitments,
-    message,
-    keys.group_public_key
-  );
-
-  // Verify
-  const valid = await frost.verifySignature(
-    signature.signature,
-    message,
-    keys.group_public_key
-  );
-
-  console.log('Signature:', signature.signature);
-  console.log('Valid:', valid);
+{
+  group_public_key: string,    // Hex (32 bytes)
+  public_key_package: string,  // JSON (for aggregation)
+  shares: [{
+    identifier: number,
+    key_package: string        // JSON (KEEP SECRET!)
+  }],
+  threshold: number,
+  total: number
 }
 ```
 
-### Next.js Configuration
+#### `generate_round1_commitment(key_package_json)`
 
-For Next.js to properly handle WASM files, you may need to add to `next.config.js`:
+Generates Round 1 commitment and nonces.
 
-```javascript
-/** @type {import('next').NextConfig} */
-const nextConfig = {
-  webpack: (config) => {
-    config.experiments = {
-      ...config.experiments,
-      asyncWebAssembly: true,
-    };
-    return config;
+**Returns:**
+```typescript
+{
+  commitment: {
+    identifier: number,
+    commitment: string    // JSON (broadcast this)
   },
-};
-
-module.exports = nextConfig;
+  nonces: {
+    identifier: number,
+    nonces: string        // JSON (KEEP SECRET!)
+  }
+}
 ```
 
-## Known Issues & Blockers
+#### `create_signing_package(commitments_json, message_hex, public_key_package_json)`
 
-### 1. Windows Build Environment
+Creates signing package with randomizer (ZIP-312).
 
-**Issue:** Windows SDK libraries (kernel32.lib) not found during Rust compilation
-**Status:** Need to run from VS Developer Command Prompt or use CI/CD
-**Workaround:** Build on Linux/macOS or use GitHub Actions
+**Returns:**
+```typescript
+{
+  signing_package: string,  // JSON
+  randomizer: string        // JSON (distribute to signers)
+}
+```
 
-Solutions:
-1. Use Visual Studio Developer Command Prompt
-2. Use WSL (Windows Subsystem for Linux)
-3. Use GitHub Actions for CI/CD builds
-4. Use Docker with Linux base image
+#### `generate_round2_signature(key_package, nonces, signing_package, randomizer)`
 
-### 2. Zcash Curve Support (Future Work)
+Generates Round 2 signature share with rerandomization.
 
-**Issue:** Currently using Ed25519, not Zcash's curves (RedPallas/RedJubjub)
-**Status:** Blocked on frost-core 0.6+ API changes
-**Impact:** FROST signatures work for Ed25519, but Zcash Orchard requires RedPallas
+**Returns:**
+```typescript
+{
+  identifier: number,
+  share: string  // JSON signature share
+}
+```
 
-The frost-core 0.6+ API has significant breaking changes:
-- No serialize()/deserialize() on KeyPackage, PublicKeyPackage
-- Nonce, NonceCommitment types moved to different modules
-- RandomizedParams is private
-- Type mismatches (expects [u8; 32] arrays, not &Vec<u8>)
+#### `aggregate_signature(shares, signing_package, public_key_package, randomizer)`
 
-## What Works
+Aggregates signature shares into final signature.
 
-✅ Key generation with trusted dealer (Ed25519 curve)
-✅ Round 1 commitment generation
-✅ Round 2 signature share generation
-✅ Signature aggregation
-✅ Signature verification
-✅ JSON serialization via serde (works with frost-ed25519)
-✅ TypeScript type safety
-✅ Fallback to mock implementation
-✅ XEdDSA authentication (spec-compliant with frostd)
-✅ X25519 key generation
-✅ Real X25519 E2E encryption
-✅ Unified keypair (one X25519 key for auth + encryption)
-✅ CI/CD builds on GitHub Actions (Linux)
+**Returns:**
+```typescript
+{
+  signature: string,   // Hex (64 bytes)
+  randomizer: string   // JSON (for verification)
+}
+```
 
-## What Doesn't Work (Yet)
+#### `verify_signature(signature_hex, message_hex, group_public_key_hex, randomizer_json)`
 
-❌ Zcash curves (RedPallas/RedJubjub) - blocked on frost-core API changes
-❌ Rerandomized FROST - requires RedPallas
-❌ Distributed Key Generation (DKG) - currently uses trusted dealer
-❌ Key resharing
-❌ Participant removal
-❌ Windows local WASM builds (use Linux/macOS or CI/CD)
+Verifies a rerandomized FROST signature.
+
+**Returns:** `{ "valid": true/false }`
+
+## What's Complete
+
+✅ FROST Ed25519 with full ceremony (33 tests pass)
+✅ FROST RedPallas for Zcash Orchard (9 tests pass)
+✅ XEdDSA authentication (10 tests pass)
+✅ E2E encryption (X25519 ECDH + AES-GCM)
+✅ Production state machines (message-log driven)
+✅ Message validation and deduplication
+✅ CI/CD builds for all WASM modules
+✅ frostd client matching spec
+
+## Future Work
+
+- [ ] Distributed Key Generation (DKG) - currently uses trusted dealer
+- [ ] Key resharing capability
+- [ ] RedJubjub support for Zcash Sapling
+- [ ] Security audit of crypto code
+- [ ] Mobile wallet integration
 
 ## Security Considerations
 
-1. **Secret Key Storage:** Signing shares must be encrypted at rest
-2. **Nonce Reuse:** XEdDSA uses randomized nonces (64 bytes per signature)
-3. **Side Channels:** WASM may be vulnerable to timing attacks
-4. **Memory Safety:** WASM provides sandboxing but secret data cleanup is important
-5. **Key Reuse:** XEdDSA allows safe reuse of X25519 keys for both ECDH and signing
+See [docs/SECURITY.md](docs/SECURITY.md) for the full threat model.
 
-## Previous Grant Attempts
-
-This is the critical piece that previous grants failed to deliver. The blockers were:
-
-1. **Complexity of frost-core API:** Required deep understanding of the FROST protocol
-2. **Cross-platform WASM builds:** Windows toolchain issues
-3. **Zcash curve integration:** frost-rerandomized has unstable API (0.6+ breaking changes)
-
-This implementation provides:
-- Working Ed25519 FROST with serde serialization
-- CI/CD builds on GitHub Actions (Linux)
-- Clear documentation of frost-core API blockers for Zcash curves
-- Fallback for development without WASM
-- Spec-compliant XEdDSA authentication for frostd
-- Real X25519 ECDH for E2E encryption
-- Unified keypair (single identity for auth + encryption)
-
-## Next Steps
-
-1. **Immediate:** Verify CI builds produce working WASM
-2. **Short-term:** Research frost-core 0.6+ API for custom serialization
-3. **Medium-term:** Migrate to frost-rerandomized for Zcash curves
-4. **Long-term:** Implement proper DKG
-5. **Production:** Add key persistence with encryption, integrate with frostd
+Key points:
+- Nonces are never reused (tracked per message_id)
+- Messages are deduplicated by ID
+- Key shares encrypted at rest (PBKDF2 + AES-GCM)
+- E2E encryption (server cannot read contents)
+- Trusted dealer model (DKG is future work)
