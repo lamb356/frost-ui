@@ -683,6 +683,7 @@ function ParticipantJoin({ signing }: { signing: ReturnType<typeof useSigning> }
 
   // Load available key shares
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setShares(getStoredFrostSharesInfo());
   }, []);
 
