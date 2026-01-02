@@ -175,15 +175,23 @@ fn generate_key_shares_internal(threshold: u16, total: u16) -> Result<KeyGenResu
         let id_bytes = identifier.serialize();
         let id: u16 = u16::from_le_bytes([id_bytes[0], id_bytes[1]]);
 
+        let verifying_share_bytes = verifying_share
+            .serialize()
+            .map_err(|e| format!("Failed to serialize verifying share: {:?}", e))?;
+
         key_shares.push(KeyShare {
             identifier: id,
             key_package: key_package_json,
-            verifying_share: hex::encode(verifying_share.serialize()),
+            verifying_share: hex::encode(verifying_share_bytes),
         });
     }
 
     // Get group public key
-    let group_public_key = hex::encode(pubkey_package.verifying_key().serialize());
+    let group_public_key_bytes = pubkey_package
+        .verifying_key()
+        .serialize()
+        .map_err(|e| format!("Failed to serialize group public key: {:?}", e))?;
+    let group_public_key = hex::encode(group_public_key_bytes);
 
     Ok(KeyGenResult {
         group_public_key,
@@ -334,8 +342,7 @@ fn generate_round2_internal(
     }
 
     // Create signing package
-    let signing_package = frost::SigningPackage::new(signing_commitments, &message)
-        .map_err(|e| format!("Failed to create signing package: {:?}", e))?;
+    let signing_package = frost::SigningPackage::new(signing_commitments, &message);
 
     // Generate signature share
     let signature_share = frost::round2::sign(&signing_package, &nonces, &key_package)
@@ -428,8 +435,7 @@ fn aggregate_internal(
     }
 
     // Create signing package
-    let signing_package = frost::SigningPackage::new(signing_commitments, &message)
-        .map_err(|e| format!("Failed to create signing package: {:?}", e))?;
+    let signing_package = frost::SigningPackage::new(signing_commitments, &message);
 
     // Build signature shares map
     let mut frost_shares: BTreeMap<frost::Identifier, frost::round2::SignatureShare> =
@@ -449,8 +455,12 @@ fn aggregate_internal(
     let signature = frost::aggregate(&signing_package, &frost_shares, &pubkey_package)
         .map_err(|e| format!("Aggregation failed: {:?}", e))?;
 
+    let signature_bytes = signature
+        .serialize()
+        .map_err(|e| format!("Failed to serialize signature: {:?}", e))?;
+
     Ok(AggregateSignature {
-        signature: hex::encode(signature.serialize()),
+        signature: hex::encode(signature_bytes),
     })
 }
 
@@ -500,7 +510,7 @@ fn verify_internal(
         .try_into()
         .map_err(|_| "Signature must be 64 bytes")?;
 
-    let signature = frost::Signature::deserialize(sig_array)
+    let signature = frost::Signature::deserialize(&sig_array)
         .map_err(|e| format!("Invalid signature: {:?}", e))?;
 
     // Parse verifying key - Ed25519 public keys are 32 bytes
@@ -508,7 +518,7 @@ fn verify_internal(
         .try_into()
         .map_err(|_| "Public key must be 32 bytes")?;
 
-    let verifying_key = frost::VerifyingKey::deserialize(key_array)
+    let verifying_key = frost::VerifyingKey::deserialize(&key_array)
         .map_err(|e| format!("Invalid group public key: {:?}", e))?;
 
     // Verify
