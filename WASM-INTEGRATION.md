@@ -11,7 +11,8 @@ This document describes the integration of real FROST cryptographic operations v
 | **X25519 Key Generation** | ✅ Production | Single keypair for auth + encryption |
 | **X25519 E2E Encryption** | ✅ Production | Real ECDH + AES-GCM for message encryption |
 | **Password Key Storage** | ✅ Production | PBKDF2 + AES-GCM for local key encryption |
-| **FROST WASM (RedPallas)** | ✅ Production | Uses reddsa with frost-rerandomized for Zcash Orchard |
+| **FROST WASM (Ed25519)** | ✅ Working | Uses frost-ed25519 for working WASM builds |
+| **FROST WASM (RedPallas)** | ⚠️ Future | Zcash Orchard requires frost-rerandomized API work |
 | **frostd Client** | ✅ Production | Matches official spec |
 | **State Machines** | ⚠️ Demo Only | Works but `inviteCode` is not in frostd spec |
 
@@ -44,18 +45,26 @@ These components work but need changes for production:
    - Sessions are identified by session_id only
    - Participants join by knowing the session_id and being in the pubkeys list
 
-### Zcash-Ready: FROST WASM with RedPallas
+### Current: FROST WASM with Ed25519
 
-The FROST WASM bindings now use **reddsa** with **frost-rerandomized** for Zcash Orchard compatibility:
+The FROST WASM bindings currently use **frost-ed25519** for a working implementation:
+
+- **Curve:** Ed25519 (Curve25519 with SHA-512)
+- **Algorithm:** Standard FROST threshold signatures
+- **Compatibility:** Works with any Ed25519-compatible system
+
+### Future: Zcash Orchard (RedPallas)
+
+For Zcash Orchard compatibility, future work will migrate to **reddsa** with **frost-rerandomized**:
 
 - **Curve:** RedPallas (Pallas curve with BLAKE2b-512)
 - **Algorithm:** Rerandomized FROST for transaction privacy
-- **Compatibility:** Zcash Orchard shielded transactions
+- **Status:** Blocked on frost-core 0.6+ API changes
 
 Key differences from standard FROST:
 - Requires a **Randomizer** for signing (provides transaction unlinkability)
-- Uses **KeyPackage** instead of just signing shares
-- Returns **PublicKeyPackage** for aggregation
+- frost-core 0.6+ has breaking API changes (no serialize/deserialize methods)
+- reddsa uses internal types not fully exposed via public API
 
 ## XEdDSA Authentication (Spec-Compliant)
 
@@ -128,36 +137,43 @@ const signature = await ed.signAsync(challengeBytes, privateKey);
 
 This ensures byte-level compatibility with frostd servers even if there are other signature scheme differences.
 
-## Curve Compatibility (Zcash Ready)
+## Curve Compatibility
 
-The WASM implementation now uses **reddsa** with **frost-rerandomized** providing RedPallas curve support for Zcash Orchard transactions.
+### Current Implementation (Ed25519)
 
-### Zcash Pool Support
+The WASM implementation currently uses **frost-ed25519** for working builds:
+
+```rust
+use frost_ed25519 as frost;
+```
+
+This provides:
+- Standard FROST threshold signatures
+- Compatible with Ed25519 ecosystem
+- Simpler API with serde serialization
+
+### Future: Zcash Pool Support
 
 | Zcash Pool | Crate | Curve | Status |
 |------------|-------|-------|--------|
-| Orchard (NU5+) | `reddsa` + `frost-rerandomized` | RedPallas (Pallas curve) | ✅ Implemented |
-| Sapling | `reddsa::frost::redjubjub` | RedJubjub (Jubjub curve) | Available (same crate) |
-| Transparent | `frost-secp256k1` | secp256k1 | Not implemented |
+| Orchard (NU5+) | `reddsa` + `frost-rerandomized` | RedPallas (Pallas curve) | ⚠️ Future work |
+| Sapling | `reddsa::frost::redjubjub` | RedJubjub (Jubjub curve) | ⚠️ Future work |
+| Transparent | `frost-secp256k1` | secp256k1 | Not planned |
 
-### Current Implementation
+### Migration Path to Zcash Curves
 
-```rust
-// Production (Orchard):
-use reddsa::frost::redpallas as frost;
+To migrate from Ed25519 to RedPallas:
 
-// For Sapling (if needed):
-// use reddsa::frost::redjubjub as frost;
-```
+1. Update Cargo.toml to use `reddsa` with `frost` feature
+2. Rewrite lib.rs for frost-rerandomized API (significant changes in 0.6+)
+3. Add Randomizer support for rerandomized FROST
+4. Handle API differences (no serialize/deserialize on many types)
 
-### Rerandomized FROST
-
-For Zcash transaction privacy, rerandomized FROST is used:
-
-1. **Randomizer Generation:** Coordinator generates a random scalar
-2. **Key Rerandomization:** All signers use the same randomizer
-3. **Signature Aggregation:** Uses randomized public key for verification
-4. **Privacy Benefit:** Each signature is unlinkable to the base public key
+The frost-core 0.6+ API is significantly different:
+- KeyPackage, PublicKeyPackage don't have serialize/deserialize
+- Nonce, NonceCommitment types moved
+- RandomizedParams is private
+- Type mismatches (expects `[u8; 32]` not `&Vec<u8>`)
 
 ## Milestones to Production
 
@@ -168,20 +184,25 @@ For Zcash transaction privacy, rerandomized FROST is used:
 - [x] State machines for ceremony flow (DEMO)
 - [x] Mock client for offline development
 
-### Phase 2: Zcash Curve Support ✅
-- [x] Update frost-wasm to use reddsa with frost-rerandomized
-- [x] Implement RedPallas (Pallas curve) for Orchard
-- [x] Add KeyPackage and PublicKeyPackage handling
-- [x] Implement randomizer for rerandomized FROST
-- [ ] Test WASM builds on all platforms (Windows has toolchain issues, use CI/CD)
+### Phase 2: Working FROST WASM ✅
+- [x] Implement frost-ed25519 WASM bindings
+- [x] Use serde for JSON serialization (works with frost-ed25519 2.0)
+- [x] Full signing flow: keygen → round1 → round2 → aggregate → verify
+- [x] CI/CD builds on Linux (GitHub Actions)
+
+### Phase 3: Zcash Curve Support (Future)
+- [ ] Research frost-core 0.6+ API changes
+- [ ] Implement custom serialization for KeyPackage/PublicKeyPackage
+- [ ] Update to reddsa with frost-rerandomized
+- [ ] Add Randomizer support for rerandomized FROST
 - [ ] Verify signature compatibility with Zcash nodes
 
-### Phase 3: Spec Compliance
+### Phase 4: Spec Compliance
 - [ ] Remove inviteCode from state machines
 - [ ] Implement proper Ed25519 -> X25519 key conversion
 - [ ] Add real transaction parsing for Zcash
 
-### Phase 4: Production Hardening
+### Phase 5: Production Hardening
 - [ ] Implement proper DKG (vs trusted dealer)
 - [ ] Add key resharing capability
 - [ ] Security audit of crypto code
@@ -202,12 +223,12 @@ For Zcash transaction privacy, rerandomized FROST is used:
 │  ├── Provides typed wrapper functions                       │
 │  └── Falls back to mock implementation if WASM unavailable  │
 ├─────────────────────────────────────────────────────────────┤
-│  WASM Module (frost_wasm.wasm) - ZCASH READY                │
+│  WASM Module (frost_wasm.wasm) - Ed25519                    │
 │  └── Compiled from Rust with wasm-bindgen                   │
-│  └── Uses reddsa for RedPallas (Zcash Orchard)              │
+│  └── Uses frost-ed25519 for standard FROST                  │
 ├─────────────────────────────────────────────────────────────┤
 │  Rust Crate (frost-wasm)                                    │
-│  ├── reddsa - RedPallas FROST with frost-rerandomized       │
+│  ├── frost-ed25519 - FROST with Ed25519 curve               │
 │  ├── wasm-bindgen - JS/WASM interop                         │
 │  └── serde_json - Data serialization                        │
 └─────────────────────────────────────────────────────────────┘
@@ -215,7 +236,7 @@ For Zcash transaction privacy, rerandomized FROST is used:
 
 ## Exposed WASM Functions
 
-The WASM module exposes these functions for RedPallas rerandomized FROST:
+The WASM module exposes these functions for Ed25519 FROST:
 
 ### `generate_key_shares(threshold, total)`
 
@@ -228,100 +249,84 @@ Generates key shares using trusted dealer key generation.
 **Returns:** JSON containing:
 ```typescript
 {
-  group_public_key: string,  // Hex-encoded group public key
-  public_key_package: string, // Hex-encoded (needed for aggregation)
+  group_public_key: string,   // Hex-encoded group public key
+  public_key_package: string, // JSON-serialized (needed for aggregation)
   shares: [{
     identifier: number,
-    signing_share: string,   // Hex-encoded (KEEP SECRET!)
-    verifying_share: string, // Hex-encoded
-    key_package: string      // Hex-encoded full key package (KEEP SECRET!)
+    key_package: string,     // JSON-serialized (KEEP SECRET!)
+    verifying_share: string  // Hex-encoded
   }],
   threshold: number,
   total: number
 }
 ```
 
-### `generate_round1_commitment(key_package_hex)`
+### `generate_round1_commitment(key_package_json)`
 
 Generates Round 1 commitment and nonces.
 
 **Parameters:**
-- `key_package_hex: string` - Participant's key package (hex, from KeyGenResult)
+- `key_package_json: string` - Participant's key package (JSON, from KeyGenResult)
 
 **Returns:** JSON containing:
 ```typescript
 {
   commitment: {
     identifier: number,
-    hiding: string,   // Hex-encoded (broadcast this)
-    binding: string   // Hex-encoded (broadcast this)
+    commitment: string   // JSON-serialized SigningCommitments (broadcast this)
   },
   nonces: {
     identifier: number,
-    hiding: string,   // Hex-encoded (KEEP SECRET!)
-    binding: string   // Hex-encoded (KEEP SECRET!)
+    nonces: string       // JSON-serialized SigningNonces (KEEP SECRET!)
   }
 }
 ```
 
-### `generate_round2_signature(key_package, nonces, commitments, message, randomizer)`
+### `generate_round2_signature(key_package, nonces, commitments, message)`
 
-Generates Round 2 signature share using rerandomized FROST.
+Generates Round 2 signature share.
 
 **Parameters:**
-- `key_package_hex: string` - Key package (hex)
-- `nonces_json: string` - JSON of SigningNonces from Round 1
-- `commitments_json: string` - JSON array of all Commitments
+- `key_package_json: string` - Key package (JSON)
+- `nonces_json: string` - JSON of SigningNonces wrapper from Round 1
+- `commitments_json: string` - JSON array of all Commitment objects
 - `message_hex: string` - Message to sign (hex)
-- `randomizer_hex: string` - Randomizer (hex, 32 bytes) - shared by coordinator
 
 **Returns:** JSON containing:
 ```typescript
 {
   identifier: number,
-  share: string  // Hex-encoded signature share
+  share: string  // JSON-serialized signature share
 }
 ```
 
-### `aggregate_signature(shares, commitments, message, public_key_package, randomizer)`
+### `aggregate_signature(shares, commitments, message, public_key_package)`
 
-Aggregates signature shares into final signature using rerandomized FROST.
+Aggregates signature shares into final signature.
 
 **Parameters:**
-- `shares_json: string` - JSON array of SignatureShares
-- `commitments_json: string` - JSON array of Commitments
+- `shares_json: string` - JSON array of SignatureShare objects
+- `commitments_json: string` - JSON array of Commitment objects
 - `message_hex: string` - Signed message (hex)
-- `public_key_package_hex: string` - PublicKeyPackage (hex, from KeyGenResult)
-- `randomizer_hex: string` - Randomizer used during signing (hex)
+- `public_key_package_json: string` - PublicKeyPackage (JSON, from KeyGenResult)
 
 **Returns:** JSON containing:
 ```typescript
 {
-  r: string,         // R component (hex)
-  s: string,         // s component (hex)
-  signature: string  // Full signature R||s (hex, 64 bytes)
+  signature: string  // Hex-encoded signature (64 bytes)
 }
 ```
 
-### `verify_signature(signature, message, group_public_key, randomizer)`
+### `verify_signature(signature, message, group_public_key)`
 
-Verifies a rerandomized signature.
+Verifies an Ed25519 FROST signature.
 
 **Parameters:**
 - `signature_hex: string` - Signature (hex, 64 bytes)
 - `message_hex: string` - Signed message (hex)
-- `group_public_key_hex: string` - Group public key (hex)
-- `randomizer_hex: string` - Randomizer used during signing (hex)
+- `group_public_key_hex: string` - Group public key (hex, 32 bytes)
 
 **Returns:** `{ "valid": true/false }`
-
-### `generate_randomizer()`
-
-Generates a random 32-byte randomizer for rerandomized FROST.
-
-**Returns:** Hex-encoded 32-byte randomizer
-
-This should be called by the coordinator and shared with all signers before Round 2.
 
 ## Build Instructions
 
@@ -479,39 +484,42 @@ Solutions:
 3. Use GitHub Actions for CI/CD builds
 4. Use Docker with Linux base image
 
-### 2. Zcash Curve Support ✅ RESOLVED
+### 2. Zcash Curve Support (Future Work)
 
-**Issue:** Was using Ed25519, not Zcash's curves
-**Status:** Now using RedPallas via reddsa crate - Zcash Orchard compatible
-**Impact:** Demo signatures work, but won't work with real Zcash until curves are swapped
+**Issue:** Currently using Ed25519, not Zcash's curves (RedPallas/RedJubjub)
+**Status:** Blocked on frost-core 0.6+ API changes
+**Impact:** FROST signatures work for Ed25519, but Zcash Orchard requires RedPallas
 
-### 3. Key Package Serialization
-
-**Issue:** Full key packages needed for some operations
-**Status:** Current implementation uses minimal data
-**Impact:** Some edge cases may fail
+The frost-core 0.6+ API has significant breaking changes:
+- No serialize()/deserialize() on KeyPackage, PublicKeyPackage
+- Nonce, NonceCommitment types moved to different modules
+- RandomizedParams is private
+- Type mismatches (expects [u8; 32] arrays, not &Vec<u8>)
 
 ## What Works
 
-✅ Key generation with trusted dealer (RedPallas curve)
+✅ Key generation with trusted dealer (Ed25519 curve)
 ✅ Round 1 commitment generation
-✅ Round 2 signature share generation with rerandomization
-✅ Signature aggregation with RandomizedParams
-✅ Signature verification with randomized key
+✅ Round 2 signature share generation
+✅ Signature aggregation
+✅ Signature verification
+✅ JSON serialization via serde (works with frost-ed25519)
 ✅ TypeScript type safety
 ✅ Fallback to mock implementation
 ✅ XEdDSA authentication (spec-compliant with frostd)
 ✅ X25519 key generation
 ✅ Real X25519 E2E encryption
 ✅ Unified keypair (one X25519 key for auth + encryption)
-✅ Full KeyPackage and PublicKeyPackage serialization
+✅ CI/CD builds on GitHub Actions (Linux)
 
 ## What Doesn't Work (Yet)
 
+❌ Zcash curves (RedPallas/RedJubjub) - blocked on frost-core API changes
+❌ Rerandomized FROST - requires RedPallas
 ❌ Distributed Key Generation (DKG) - currently uses trusted dealer
 ❌ Key resharing
 ❌ Participant removal
-❌ Windows WASM builds (use Linux/macOS or CI/CD)
+❌ Windows local WASM builds (use Linux/macOS or CI/CD)
 
 ## Security Considerations
 
@@ -527,11 +535,12 @@ This is the critical piece that previous grants failed to deliver. The blockers 
 
 1. **Complexity of frost-core API:** Required deep understanding of the FROST protocol
 2. **Cross-platform WASM builds:** Windows toolchain issues
-3. **Zcash curve integration:** frost-rerandomized wasn't stable
+3. **Zcash curve integration:** frost-rerandomized has unstable API (0.6+ breaking changes)
 
 This implementation provides:
-- Working Ed25519 FROST (proof of concept)
-- Clear path to Zcash curves (swap frost-ed25519 for frost-rerandomized)
+- Working Ed25519 FROST with serde serialization
+- CI/CD builds on GitHub Actions (Linux)
+- Clear documentation of frost-core API blockers for Zcash curves
 - Fallback for development without WASM
 - Spec-compliant XEdDSA authentication for frostd
 - Real X25519 ECDH for E2E encryption
@@ -539,8 +548,8 @@ This implementation provides:
 
 ## Next Steps
 
-1. Fix Windows build environment (or use CI/CD)
-2. Swap frost-ed25519 for frost-rerandomized
-3. Implement proper DKG
-4. Add key persistence with encryption
-5. Integrate with frostd for real ceremonies
+1. **Immediate:** Verify CI builds produce working WASM
+2. **Short-term:** Research frost-core 0.6+ API for custom serialization
+3. **Medium-term:** Migrate to frost-rerandomized for Zcash curves
+4. **Long-term:** Implement proper DKG
+5. **Production:** Add key persistence with encryption, integrate with frostd
