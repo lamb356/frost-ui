@@ -30,9 +30,12 @@ const CURVE_ORDER = BigInt(
   '7237005577332262213973186563042994240857116359379907606001950938285454250989'
 );
 
-// 2^255 for the hash prefix in hash1
+// Hash prefix for hash_i functions per Signal XEdDSA spec:
+// hash_i uses 32 bytes where first byte = 0xFF - i, rest = 0xFF
+// hash1: [0xFE, 0xFF, 0xFF, ..., 0xFF] (32 bytes)
 const HASH1_PREFIX = new Uint8Array(32);
-HASH1_PREFIX[31] = 0x80; // 2^255 as little-endian
+HASH1_PREFIX.fill(0xff);
+HASH1_PREFIX[0] = 0xfe; // hash1 uses 0xFE as first byte
 
 /**
  * XEdDSA key pair derived from an X25519 private key.
@@ -45,6 +48,8 @@ interface XEdDSAKeyPair {
   publicKey: Uint8Array;
   /** Adjusted Ed25519 private scalar (32 bytes) */
   privateScalar: bigint;
+  /** True if the original point had sign bit 1 and we negated the scalar */
+  needsNegation: boolean;
 }
 
 /**
@@ -86,8 +91,9 @@ function calculateKeyPair(x25519PrivateKey: Uint8Array): XEdDSAKeyPair {
   // In Ed25519, the sign bit is x mod 2
   const signBit = affine.x & BigInt(1);
 
+  const needsNegation = signBit === BigInt(1);
   let a: bigint;
-  if (signBit === BigInt(1)) {
+  if (needsNegation) {
     // Negate the private key: a = -k mod n
     a = mod(-k, CURVE_ORDER);
   } else {
@@ -103,6 +109,7 @@ function calculateKeyPair(x25519PrivateKey: Uint8Array): XEdDSAKeyPair {
   return {
     publicKey,
     privateScalar: a,
+    needsNegation,
   };
 }
 
@@ -154,6 +161,15 @@ function hashToScalar(hashOutput: Uint8Array): bigint {
  * @param random - 64 bytes of random data (optional, generated if not provided)
  * @returns XEdDSA signature (64 bytes: R || s)
  */
+// Debug flag - set to true to enable verbose logging
+const XEDDSA_DEBUG = typeof process !== 'undefined' && process.env.XEDDSA_DEBUG === '1';
+
+function debugHex(name: string, bytes: Uint8Array): void {
+  if (!XEDDSA_DEBUG) return;
+  const hex = Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+  console.log(`  ${name}: ${hex}`);
+}
+
 export function xeddsaSign(
   x25519PrivateKey: Uint8Array,
   message: Uint8Array,
@@ -169,30 +185,127 @@ export function xeddsaSign(
     throw new Error('Random data must be 64 bytes');
   }
 
-  // Calculate XEdDSA key pair
+  if (XEDDSA_DEBUG) {
+    console.log('\n=== XEdDSA Sign Debug ===');
+    debugHex('x25519PrivateKey', x25519PrivateKey);
+    debugHex('message', message);
+    debugHex('Z (random)', Z);
+  }
+
+  // Calculate XEdDSA key pair (Ed25519 public key with sign bit 0)
   const { publicKey: A, privateScalar: a } = calculateKeyPair(x25519PrivateKey);
 
-  // Convert private scalar to bytes for hashing
-  const aBytes = numberToBytesLE(a, 32);
+  if (XEDDSA_DEBUG) {
+    debugHex('A (Ed25519 pubkey from privkey)', A);
+    console.log(`  a (scalar): ${a.toString(16)}`);
+
+    // Also compute Ed25519 pubkey from X25519 pubkey (as verifier would)
+    // to verify they match
+    const x25519PubKey = x25519GetPublicKey(x25519PrivateKey);
+    debugHex('X25519 pubkey (computed)', x25519PubKey);
+
+    // Convert X25519 pubkey to Ed25519 (as frostd would do)
+    const p = ed25519.Point.CURVE().p;
+    const u = bytesToNumberLE(x25519PubKey);
+    const uMinus1 = mod(u - BigInt(1), p);
+    const uPlus1 = mod(u + BigInt(1), p);
+    const uPlus1Inv = modInverse(uPlus1, p);
+    const y_from_u = mod(uMinus1 * uPlus1Inv, p);
+    const A_from_u = numberToBytesLE(y_from_u, 32);
+    // Ensure sign bit is 0
+    A_from_u[31] &= 0x7f;
+    debugHex('A (Ed25519 pubkey from X25519)', A_from_u);
+
+    // Check if they match
+    const matches = A.every((b, i) => b === A_from_u[i]);
+    console.log(`  Ed25519 pubkeys match: ${matches}`);
+  }
 
   // Generate nonce: r = hash1(a || M || Z) mod n
+  // Per ockam_vault implementation: use the ADJUSTED SCALAR (after negation if needed)
+  const aBytes = numberToBytesLE(a, 32);
   const rHash = hash1(aBytes, message, Z);
   const r = hashToScalar(rHash);
+
+  if (XEDDSA_DEBUG) {
+    debugHex('hash1(a||M||Z)', rHash);
+    console.log(`  r (scalar): ${r.toString(16)}`);
+  }
 
   // Compute R = r * B
   const R = ed25519.Point.BASE.multiply(r);
   const RBytes = R.toBytes();
 
+  if (XEDDSA_DEBUG) {
+    debugHex('R', RBytes);
+  }
+
   // Compute challenge: h = hash(R || A || M) mod n
+  // Per XEdDSA spec: use Ed25519 public key A (with sign bit 0) in challenge hash
   const hHash = hash(RBytes, A, message);
   const h = hashToScalar(hHash);
+
+  if (XEDDSA_DEBUG) {
+    debugHex('hash(R||A||M)', hHash);
+    console.log(`  h (scalar): ${h.toString(16)}`);
+  }
 
   // Compute s = r + h*a mod n
   const s = mod(r + h * a, CURVE_ORDER);
   const sBytes = numberToBytesLE(s, 32);
 
+  if (XEDDSA_DEBUG) {
+    console.log(`  s = r + h*a mod n: ${s.toString(16)}`);
+    debugHex('sBytes', sBytes);
+  }
+
   // Return signature R || s (64 bytes)
-  return concatBytes(RBytes, sBytes);
+  const signature = concatBytes(RBytes, sBytes);
+
+  if (XEDDSA_DEBUG) {
+    debugHex('signature (R||s)', signature);
+    console.log('=== End XEdDSA Debug ===\n');
+  }
+
+  return signature;
+}
+
+/**
+ * Get the X25519 public key from an X25519 private key.
+ * This is a simple scalar multiplication on the Montgomery curve.
+ */
+function x25519GetPublicKey(privateKey: Uint8Array): Uint8Array {
+  // Use the x25519 basepoint multiplication
+  // The basepoint for X25519 is u=9
+  const basepoint = new Uint8Array(32);
+  basepoint[0] = 9;
+
+  // Perform scalar multiplication using the ed25519 module's x25519 utilities
+  // Note: We need to import x25519 from noble/curves
+  // For now, use a different approach - derive from Edwards point
+
+  // Actually, the easiest way is to compute the Edwards point and convert to Montgomery
+  // A = a * B (Edwards), then convert to Montgomery u-coordinate
+
+  const { publicKey: A } = calculateKeyPair(privateKey);
+
+  // Convert Edwards y-coordinate to Montgomery u-coordinate
+  // u = (1 + y) / (1 - y) mod p
+  const p = ed25519.Point.CURVE().p;
+
+  // Extract y from the encoded Ed25519 point (first 255 bits, little-endian)
+  // Clear the sign bit to get y
+  const yBytes = A.slice();
+  yBytes[31] &= 0x7f; // Clear sign bit
+  const y = bytesToNumberLE(yBytes);
+
+  // u = (1 + y) / (1 - y) mod p
+  const onePlusY = mod(BigInt(1) + y, p);
+  const oneMinusY = mod(BigInt(1) - y, p);
+  const oneMinusYInv = modInverse(oneMinusY, p);
+  const u = mod(onePlusY * oneMinusYInv, p);
+
+  return numberToBytesLE(u, 32);
 }
 
 /**

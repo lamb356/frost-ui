@@ -200,10 +200,9 @@ export function generateAuthKeyPair(): Ed25519KeyPair {
  * XEdDSA allows signing with an X25519 private key by converting it to
  * Ed25519 format internally.
  *
- * Per the frostd implementation (integration_tests.rs):
- * - The challenge is signed as UTF-8 bytes (challenge.as_bytes())
- * - The signature scheme is XEdDSA (not standard Ed25519)
- * - This allows using the same keypair for both ECDH and signing
+ * CRITICAL: The challenge UUID must be signed as its 16-byte binary representation,
+ * NOT as a 36-byte UTF-8 string! frostd uses Rust's Uuid::as_bytes() which returns
+ * the compact binary form.
  *
  * @param x25519PrivateKeyHex - X25519 private key (32 bytes, hex-encoded)
  * @param challenge - UUID challenge string from /challenge endpoint
@@ -214,8 +213,9 @@ export function signChallenge(
   challenge: string
 ): string {
   const privateKey = hexToBytes(x25519PrivateKeyHex);
-  // Sign the challenge as UTF-8 bytes (matches frostd integration tests)
-  const challengeBytes = new TextEncoder().encode(challenge);
+  // CRITICAL: Sign the 16-byte binary UUID, NOT the 36-byte string!
+  // frostd uses Uuid::as_bytes() which returns the binary representation
+  const challengeBytes = uuidToBytes(challenge);
   // Use XEdDSA signing (converts X25519 key to Ed25519 internally)
   const signature = xeddsaSign(privateKey, challengeBytes);
 
@@ -224,7 +224,7 @@ export function signChallenge(
     console.log('XEdDSA Debug:');
     console.log('  Private key:', x25519PrivateKeyHex);
     console.log('  Challenge:', challenge);
-    console.log('  Challenge bytes:', bytesToHex(challengeBytes));
+    console.log('  Challenge bytes (binary UUID):', bytesToHex(challengeBytes));
     console.log('  Signature:', bytesToHex(signature));
   }
 

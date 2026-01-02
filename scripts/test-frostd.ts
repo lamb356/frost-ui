@@ -3,6 +3,7 @@
  * frostd Smoke Test
  *
  * Tests the complete authentication and session flow against a running frostd server.
+ * Uses the Rust xeddsa WASM module for byte-for-byte compatibility with frostd.
  *
  * Usage:
  *   npx tsx scripts/test-frostd.ts [server-url]
@@ -13,20 +14,74 @@
 // Disable TLS certificate validation for self-signed certs
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 
+// Hex encoding utilities
+function bytesToHex(bytes: Uint8Array): string {
+  return Array.from(bytes)
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+function hexToBytes(hex: string): Uint8Array {
+  if (hex.length % 2 !== 0) {
+    throw new Error('Hex string must have even length');
+  }
+  const bytes = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < hex.length; i += 2) {
+    bytes[i / 2] = parseInt(hex.substring(i, i + 2), 16);
+  }
+  return bytes;
+}
+
+/**
+ * Convert UUID string to 16-byte binary representation.
+ * frostd uses Rust's Uuid::as_bytes() which returns the 16-byte binary form,
+ * NOT the 36-character string form.
+ *
+ * Example: "b324f3f9-4a23-477d-9883-2b12d9d42b94" -> [0xb3, 0x24, 0xf3, 0xf9, ...]
+ */
+function uuidToBytes(uuid: string): Uint8Array {
+  // Remove hyphens and parse as hex
+  const hex = uuid.replace(/-/g, '');
+  if (hex.length !== 32) {
+    throw new Error(`Invalid UUID: expected 32 hex chars, got ${hex.length}`);
+  }
+  return hexToBytes(hex);
+}
+
 // Use dynamic import for ESM modules
 async function main() {
   const SERVER_URL = process.argv[2] || 'https://localhost:2743';
 
   console.log('');
   console.log('='.repeat(60));
-  console.log('  frostd Smoke Test');
+  console.log('  frostd Smoke Test (Rust XEdDSA WASM)');
   console.log('='.repeat(60));
   console.log(`  Server: ${SERVER_URL}`);
   console.log('='.repeat(60));
   console.log('');
 
-  // Import our crypto functions
-  const { generateAuthKeyPair, signChallenge } = await import('../src/lib/crypto/index.js');
+  // Import the Rust xeddsa WASM module for frostd-compatible signing
+  console.log('Loading XEdDSA WASM module...');
+  const wasm = await import('../src/lib/xeddsa-wasm/pkg/xeddsa_wasm.js');
+  console.log('XEdDSA WASM loaded successfully!\n');
+
+  // WASM-based key generation and signing
+  function generateAuthKeyPair(): { publicKey: string; privateKey: string } {
+    const keypair = wasm.generate_keypair();
+    return {
+      publicKey: bytesToHex(new Uint8Array(keypair.public_key)),
+      privateKey: bytesToHex(new Uint8Array(keypair.private_key)),
+    };
+  }
+
+  function signChallenge(privateKeyHex: string, challenge: string): string {
+    const privateKey = hexToBytes(privateKeyHex);
+    // CRITICAL: Sign the 16-byte binary UUID, NOT the 36-byte string!
+    // frostd uses Uuid::as_bytes() which returns binary representation
+    const messageBytes = uuidToBytes(challenge);
+    const signature = wasm.sign(privateKey, messageBytes);
+    return bytesToHex(new Uint8Array(signature));
+  }
 
   let accessToken: string | null = null;
   let sessionId: string | null = null;
@@ -89,37 +144,53 @@ async function main() {
   try {
     const keys = generateAuthKeyPair();
     pubkey = keys.publicKey;
-    pass('Generate keypair', `pubkey: ${pubkey.slice(0, 16)}...`);
+    pass('Generate keypair', `pubkey (X25519): ${pubkey}`);
+    console.log(`         pubkey length: ${pubkey.length} hex chars = ${pubkey.length / 2} bytes`);
 
     // Store private key for signing
     var privateKey = keys.privateKey;
+    console.log(`         privateKey length: ${privateKey.length} hex chars = ${privateKey.length / 2} bytes`);
   } catch (e) {
     fail('Generate keypair', String(e));
     process.exit(1);
   }
 
   // Step 2: Get challenge
-  console.log('\n--- Step 2: GET /challenge ---');
+  console.log('\n--- Step 2: POST /challenge ---');
   let challenge: string;
   try {
     const res = await request('POST', '/challenge');
     if (!res.ok) {
-      fail('GET /challenge', `Status ${res.status}: ${JSON.stringify(res.data)}`);
+      fail('POST /challenge', `Status ${res.status}: ${JSON.stringify(res.data)}`);
       process.exit(1);
     }
     challenge = (res.data as { challenge: string }).challenge;
-    pass('GET /challenge', `challenge: ${challenge}`);
+    pass('POST /challenge', `challenge (UUID): ${challenge}`);
+
+    // Show the challenge bytes that will be signed (16-byte binary, NOT 36-byte string)
+    const challengeBytes = uuidToBytes(challenge);
+    const challengeHex = Array.from(challengeBytes).map(b => b.toString(16).padStart(2, '0')).join('');
+    console.log(`         challenge as binary UUID: ${challengeHex}`);
+    console.log(`         challenge byte length: ${challengeBytes.length} bytes (binary UUID, not string)`);
   } catch (e) {
-    fail('GET /challenge', String(e));
+    fail('POST /challenge', String(e));
     process.exit(1);
   }
 
-  // Step 3: Sign challenge with XEdDSA
-  console.log('\n--- Step 3: Sign Challenge (XEdDSA) ---');
+  // Step 3: Sign challenge with XEdDSA (using Rust WASM)
+  console.log('\n--- Step 3: Sign Challenge (Rust XEdDSA WASM) ---');
   let signature: string;
   try {
     signature = signChallenge(privateKey!, challenge);
-    pass('Sign challenge', `signature: ${signature.slice(0, 32)}...`);
+    pass('Sign challenge', `signature: ${signature}`);
+    console.log(`         signature length: ${signature.length} hex chars = ${signature.length / 2} bytes`);
+
+    // Self-verification using Rust WASM (with binary UUID)
+    const pubBytes = hexToBytes(pubkey!);
+    const messageBytes = uuidToBytes(challenge);
+    const sigBytes = hexToBytes(signature);
+    const selfVerify = wasm.verify(pubBytes, messageBytes, sigBytes);
+    console.log(`         Self-verify (Rust WASM): ${selfVerify ? 'PASS' : 'FAIL'}`);
   } catch (e) {
     fail('Sign challenge', String(e));
     process.exit(1);
@@ -127,14 +198,33 @@ async function main() {
 
   // Step 4: Login
   console.log('\n--- Step 4: POST /login ---');
+  const loginPayload = {
+    challenge,
+    pubkey,
+    signature,
+  };
+  console.log('         Login payload:');
+  console.log(`           challenge: ${loginPayload.challenge}`);
+  console.log(`           pubkey: ${loginPayload.pubkey}`);
+  console.log(`           signature: ${loginPayload.signature}`);
+
+  // Debug: show exact bytes
+  console.log('');
+  console.log('         DEBUG - Exact byte values:');
+  console.log(`           pubkey bytes: [${Array.from(hexToBytes(pubkey!)).join(', ')}]`);
+  const msgBytes = uuidToBytes(challenge);
+  console.log(`           message bytes (binary UUID): [${Array.from(msgBytes).join(', ')}]`);
+  console.log(`           signature bytes: [${Array.from(hexToBytes(signature)).join(', ')}]`);
   try {
-    const res = await request('POST', '/login', {
-      challenge,
-      pubkey,
-      signature,
-    });
+    const res = await request('POST', '/login', loginPayload);
     if (!res.ok) {
       fail('POST /login', `Status ${res.status}: ${JSON.stringify(res.data)}`);
+      console.log('');
+      console.log('         DEBUG: Server response suggests signature verification failed.');
+      console.log('         Possible causes:');
+      console.log('         1. Wrong message format (UTF-8 vs binary UUID)');
+      console.log('         2. Wrong public key format (X25519 vs Ed25519)');
+      console.log('         3. XEdDSA algorithm mismatch with Rust xeddsa crate');
       process.exit(1);
     }
     accessToken = (res.data as { access_token: string }).access_token;

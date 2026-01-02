@@ -1,173 +1,155 @@
 /**
- * Coordinator State Machine
+ * Coordinator State Machine (Production-Ready)
  *
- * Manages the signing ceremony flow for the coordinator role.
- * States: idle → creatingSession → waitingForParticipants → collectingRound1 →
- *         sendingRound2 → collectingRound2 → aggregating → complete
+ * Manages the FROST signing ceremony from the coordinator's perspective.
+ * Implements the protocol specified by frostd with full error handling.
  *
- * ## IMPORTANT: frostd Spec Compliance Notes
- *
- * The frostd specification (https://frost.zfnd.org/zcash/server.html) does NOT
- * define these concepts that this state machine currently uses:
- *
- * 1. **inviteCode**: The frostd spec has no invite code concept. Sessions are
- *    identified solely by session_id. Participants must know the session_id
- *    and be included in the pubkeys list when the session is created.
- *    TODO: Remove inviteCode and use session_id directly.
- *
- * 2. **PARTICIPANT_JOINED event**: The frostd server does not emit join events.
- *    Instead, participant readiness is determined by:
- *    - Calling /get_session_info to see the pubkeys list
- *    - Receiving Round 1 commitment messages via /receive
- *    When a participant sends their Round 1 commitment, they have effectively
- *    "joined" the signing ceremony.
- *
- * 3. **Real-time participant tracking**: Since frostd uses polling (not WebSocket),
- *    the coordinator must poll /receive to detect when participants have sent
- *    their commitments. The session info shows configured pubkeys, not live status.
- *
- * ## How This Machine Should Work with Real frostd
- *
- * 1. Coordinator creates session via POST /create_new_session with pubkeys list
- * 2. Coordinator shares session_id with participants out-of-band
- * 3. Coordinator polls /receive (as_coordinator=true) for incoming messages
- * 4. When a Round 1 commitment message arrives, that participant is "ready"
- * 5. Once threshold commitments received → transition to collectingRound2
+ * Design principles:
+ * - Single source of truth = message log
+ * - State derived by replaying messages
+ * - Side effects (send/poll) are isolated actors
+ * - No non-spec concepts (inviteCode, etc.)
  */
 
-import { setup, assign, fromPromise } from 'xstate';
+import { createMachine, assign, fromPromise, type ActorRefFrom } from 'xstate';
 import type {
-  SessionId,
-  SessionInfo,
-  SigningCommitment,
-  FrostSignatureShare,
-  AggregateSignature,
-  ParticipantId,
-  FrostError,
-} from '@/types';
+  FrostMessage,
+  Round1CommitmentPayload,
+  Round2SignatureSharePayload,
+  AbortReason,
+} from '@/types/messages';
+import {
+  createCommitmentsSet,
+  createSignatureResult,
+  createAbort,
+} from '@/types/messages';
+import {
+  type ProtocolPhase,
+  DeduplicationSet,
+  NonceTracker,
+} from './validation';
 
 // =============================================================================
 // Types
 // =============================================================================
 
 export interface CoordinatorContext {
-  // Session info
-  sessionId: SessionId | null;
-  session: SessionInfo | null;
-  /**
-   * DEMO ONLY: The frostd spec does NOT have an invite code concept.
-   * Sessions are identified by session_id only. This field exists for
-   * UI convenience but should be removed when integrating with real frostd.
-   * Share session_id directly with participants instead.
-   */
-  inviteCode: string | null;
-
-  // Configuration
-  sessionName: string;
+  sessionId: string | null;
+  coordinatorPubkey: string;
   threshold: number;
   maxParticipants: number;
+  participantPubkeys: string[];
   message: string | null;
-
-  // Signing state
-  selectedSigners: ParticipantId[];
-  commitments: Map<ParticipantId, SigningCommitment>;
-  signatureShares: Map<ParticipantId, FrostSignatureShare>;
-  aggregateSignature: AggregateSignature | null;
-
-  // Error handling
-  error: FrostError | null;
-  retryCount: number;
-  maxRetries: number;
-
-  // Timeouts
-  participantTimeout: number; // ms
-  roundTimeout: number; // ms
+  selectedSignerIds: number[];
+  messageLog: FrostMessage[];
+  commitments: Map<number, Round1CommitmentPayload>;
+  signatureShares: Map<number, Round2SignatureSharePayload>;
+  aggregateSignature: string | null;
+  verified: boolean;
+  error: CoordinatorError | null;
+  abortReason: AbortReason | null;
+  dedupeSet: DeduplicationSet;
+  nonceTracker: NonceTracker;
+  round1TimeoutMs: number;
+  round2TimeoutMs: number;
+  sessionTimeoutMs: number;
+  phase: ProtocolPhase;
 }
 
-/**
- * Coordinator events.
- *
- * NOTE: PARTICIPANT_JOINED is NOT a frostd server event. The frostd server
- * does not notify when participants join. Instead, this event should be
- * derived from receiving Round 1 commitment messages via /receive polling.
- * When a commitment message arrives from a pubkey, that participant has
- * effectively "joined" the signing ceremony.
- */
+export interface CoordinatorError {
+  code: CoordinatorErrorCode;
+  message: string;
+  details?: Record<string, unknown>;
+}
+
+export type CoordinatorErrorCode =
+  | 'SESSION_CREATION_FAILED'
+  | 'ROUND1_TIMEOUT'
+  | 'ROUND2_TIMEOUT'
+  | 'THRESHOLD_NOT_MET'
+  | 'INVALID_MESSAGE'
+  | 'AGGREGATION_FAILED'
+  | 'SIGNER_DROPPED'
+  | 'SESSION_EXPIRED'
+  | 'ABORTED';
+
 export type CoordinatorEvent =
-  | { type: 'START'; sessionName: string; threshold: number; maxParticipants: number }
-  | { type: 'SESSION_CREATED'; session: SessionInfo; inviteCode: string }
-  /**
-   * DERIVED EVENT: Not from frostd. Fire this when a Round 1 commitment
-   * message is received via /receive polling. The participantId should be
-   * determined by matching the sender's pubkey to the session's pubkey list.
-   */
-  | { type: 'PARTICIPANT_JOINED'; participantId: ParticipantId }
-  | { type: 'PARTICIPANT_LEFT'; participantId: ParticipantId }
-  | { type: 'START_SIGNING'; message: string; signerIds: ParticipantId[] }
-  | { type: 'COMMITMENT_RECEIVED'; commitment: SigningCommitment }
-  | { type: 'ALL_COMMITMENTS_RECEIVED' }
-  | { type: 'ROUND2_STARTED' }
-  | { type: 'SIGNATURE_SHARE_RECEIVED'; share: FrostSignatureShare }
-  | { type: 'ALL_SHARES_RECEIVED' }
-  | { type: 'SIGNATURE_AGGREGATED'; signature: AggregateSignature }
-  | { type: 'TIMEOUT' }
-  | { type: 'ERROR'; error: FrostError }
-  | { type: 'RETRY' }
-  | { type: 'CANCEL' }
-  | { type: 'RESET' };
+  | { type: 'UI_START'; participantPubkeys: string[]; threshold: number }
+  | { type: 'UI_START_SIGNING'; message: string; signerIds: number[] }
+  | { type: 'UI_CANCEL' }
+  | { type: 'UI_RESET' }
+  | { type: 'RX_ROUND1_COMMITMENT'; participantId: number; hiding: string; binding: string }
+  | { type: 'RX_ROUND2_SIGNATURE_SHARE'; participantId: number; share: string }
+  | { type: 'RX_ABORT'; reason: AbortReason; message: string }
+  | { type: 'AGGREGATE_SUCCESS'; signature: string; verified: boolean }
+  | { type: 'AGGREGATE_FAILED'; error: string }
+  | { type: 'SESSION_CREATED'; sessionId: string }
+  | { type: 'SEND_SUCCESS' }
+  | { type: 'SEND_FAILED'; error: string };
+
+export function createInitialCoordinatorContext(
+  coordinatorPubkey: string,
+  options: {
+    round1TimeoutMs?: number;
+    round2TimeoutMs?: number;
+    sessionTimeoutMs?: number;
+  } = {}
+): CoordinatorContext {
+  return {
+    sessionId: null,
+    coordinatorPubkey,
+    threshold: 2,
+    maxParticipants: 3,
+    participantPubkeys: [],
+    message: null,
+    selectedSignerIds: [],
+    messageLog: [],
+    commitments: new Map(),
+    signatureShares: new Map(),
+    aggregateSignature: null,
+    verified: false,
+    error: null,
+    abortReason: null,
+    dedupeSet: new DeduplicationSet(),
+    nonceTracker: new NonceTracker(),
+    round1TimeoutMs: options.round1TimeoutMs ?? 120000,
+    round2TimeoutMs: options.round2TimeoutMs ?? 120000,
+    sessionTimeoutMs: options.sessionTimeoutMs ?? 600000,
+    phase: 'idle',
+  };
+}
 
 // =============================================================================
-// Initial Context
-// =============================================================================
-
-const initialContext: CoordinatorContext = {
-  sessionId: null,
-  session: null,
-  inviteCode: null,
-  sessionName: '',
-  threshold: 2,
-  maxParticipants: 3,
-  message: null,
-  selectedSigners: [],
-  commitments: new Map(),
-  signatureShares: new Map(),
-  aggregateSignature: null,
-  error: null,
-  retryCount: 0,
-  maxRetries: 3,
-  participantTimeout: 300000, // 5 minutes
-  roundTimeout: 120000, // 2 minutes
-};
-
-// =============================================================================
-// Actor Logic (Services)
+// Actor Logic (Services) - Placeholders for dependency injection
 // =============================================================================
 
 export const createSessionActor = fromPromise<
-  { session: SessionInfo; inviteCode: string },
-  { sessionName: string; threshold: number; maxParticipants: number }
->(async ({ input }) => {
-  // This will be connected to FrostClient.createSession()
-  // For now, return a placeholder that will be replaced with actual implementation
+  { sessionId: string },
+  { pubkeys: string[]; messageCount: number }
+>(async () => {
   throw new Error('createSessionActor must be provided via machine options');
 });
 
-export const startSigningActor = fromPromise<
+export const sendMessageActor = fromPromise<
   void,
-  { sessionId: SessionId; message: string; signerIds: ParticipantId[] }
->(async ({ input }) => {
-  throw new Error('startSigningActor must be provided via machine options');
+  { sessionId: string; message: FrostMessage; recipients: string[] }
+>(async () => {
+  throw new Error('sendMessageActor must be provided via machine options');
 });
 
 export const aggregateSignatureActor = fromPromise<
-  AggregateSignature,
-  { sessionId: SessionId }
->(async ({ input }) => {
+  { signature: string; verified: boolean },
+  {
+    message: string;
+    commitments: Round1CommitmentPayload[];
+    shares: Round2SignatureSharePayload[];
+  }
+>(async () => {
   throw new Error('aggregateSignatureActor must be provided via machine options');
 });
 
-export const closeSessionActor = fromPromise<void, { sessionId: SessionId }>(
-  async ({ input }) => {
+export const closeSessionActor = fromPromise<void, { sessionId: string }>(
+  async () => {
     throw new Error('closeSessionActor must be provided via machine options');
   }
 );
@@ -176,140 +158,26 @@ export const closeSessionActor = fromPromise<void, { sessionId: SessionId }>(
 // State Machine
 // =============================================================================
 
-export const coordinatorMachine = setup({
+export const coordinatorMachine = createMachine({
+  id: 'coordinator',
+  initial: 'idle',
   types: {
     context: {} as CoordinatorContext,
     events: {} as CoordinatorEvent,
   },
-  actors: {
-    createSession: createSessionActor,
-    startSigning: startSigningActor,
-    aggregateSignature: aggregateSignatureActor,
-    closeSession: closeSessionActor,
-  },
-  actions: {
-    setSessionConfig: assign({
-      sessionName: ({ event }) => {
-        if (event.type === 'START') return event.sessionName;
-        return '';
-      },
-      threshold: ({ event }) => {
-        if (event.type === 'START') return event.threshold;
-        return 2;
-      },
-      maxParticipants: ({ event }) => {
-        if (event.type === 'START') return event.maxParticipants;
-        return 3;
-      },
-    }),
-    setSession: assign({
-      sessionId: ({ event }) => {
-        if (event.type === 'SESSION_CREATED') return event.session.sessionId;
-        return null;
-      },
-      session: ({ event }) => {
-        if (event.type === 'SESSION_CREATED') return event.session;
-        return null;
-      },
-      inviteCode: ({ event }) => {
-        if (event.type === 'SESSION_CREATED') return event.inviteCode;
-        return null;
-      },
-    }),
-    setSigningParams: assign({
-      message: ({ event }) => {
-        if (event.type === 'START_SIGNING') return event.message;
-        return null;
-      },
-      selectedSigners: ({ event }) => {
-        if (event.type === 'START_SIGNING') return event.signerIds;
-        return [];
-      },
-    }),
-    addCommitment: assign({
-      commitments: ({ context, event }) => {
-        if (event.type === 'COMMITMENT_RECEIVED') {
-          const newMap = new Map(context.commitments);
-          newMap.set(event.commitment.participantId, event.commitment);
-          return newMap;
-        }
-        return context.commitments;
-      },
-    }),
-    addSignatureShare: assign({
-      signatureShares: ({ context, event }) => {
-        if (event.type === 'SIGNATURE_SHARE_RECEIVED') {
-          const newMap = new Map(context.signatureShares);
-          newMap.set(event.share.participantId, event.share);
-          return newMap;
-        }
-        return context.signatureShares;
-      },
-    }),
-    setAggregateSignature: assign({
-      aggregateSignature: ({ event }) => {
-        if (event.type === 'SIGNATURE_AGGREGATED') return event.signature;
-        return null;
-      },
-    }),
-    setError: assign({
-      error: ({ event }) => {
-        if (event.type === 'ERROR') return event.error;
-        return null;
-      },
-    }),
-    clearError: assign({
-      error: () => null,
-    }),
-    incrementRetry: assign({
-      retryCount: ({ context }) => context.retryCount + 1,
-    }),
-    resetRetryCount: assign({
-      retryCount: () => 0,
-    }),
-    resetContext: assign(() => initialContext),
-    clearSigningState: assign({
-      commitments: () => new Map(),
-      signatureShares: () => new Map(),
-      aggregateSignature: () => null,
-      message: () => null,
-      selectedSigners: () => [],
-    }),
-  },
-  guards: {
-    hasEnoughParticipants: ({ context }) => {
-      const participantCount = context.session?.participants.length ?? 0;
-      return participantCount >= context.threshold;
-    },
-    hasAllCommitments: ({ context }) => {
-      return context.commitments.size >= context.selectedSigners.length;
-    },
-    hasAllShares: ({ context }) => {
-      return context.signatureShares.size >= context.selectedSigners.length;
-    },
-    canRetry: ({ context }) => {
-      return context.retryCount < context.maxRetries;
-    },
-    isParticipantDrop: ({ context, event }) => {
-      if (event.type !== 'PARTICIPANT_LEFT') return false;
-      return context.selectedSigners.includes(event.participantId);
-    },
-  },
-  delays: {
-    PARTICIPANT_TIMEOUT: ({ context }) => context.participantTimeout,
-    ROUND_TIMEOUT: ({ context }) => context.roundTimeout,
-  },
-}).createMachine({
-  id: 'coordinator',
-  initial: 'idle',
-  context: initialContext,
+  context: createInitialCoordinatorContext(''),
 
   states: {
     idle: {
       on: {
-        START: {
+        UI_START: {
           target: 'creatingSession',
-          actions: ['setSessionConfig', 'clearError'],
+          actions: assign({
+            participantPubkeys: ({ event }) => event.participantPubkeys,
+            threshold: ({ event }) => event.threshold,
+            maxParticipants: ({ event }) => event.participantPubkeys.length,
+            error: () => null,
+          }),
         },
       },
     },
@@ -317,292 +185,280 @@ export const coordinatorMachine = setup({
     creatingSession: {
       invoke: {
         id: 'createSession',
-        src: 'createSession',
+        src: createSessionActor,
         input: ({ context }) => ({
-          sessionName: context.sessionName,
-          threshold: context.threshold,
-          maxParticipants: context.maxParticipants,
+          pubkeys: context.participantPubkeys,
+          messageCount: 1,
         }),
         onDone: {
-          target: 'waitingForParticipants',
+          target: 'waiting',
           actions: assign({
-            sessionId: ({ event }) => event.output.session.sessionId,
-            session: ({ event }) => event.output.session,
-            inviteCode: ({ event }) => event.output.inviteCode,
+            sessionId: ({ event }) => event.output.sessionId,
           }),
         },
         onError: {
-          target: 'error',
+          target: 'failed',
           actions: assign({
             error: ({ event }) => ({
-              code: 'UNKNOWN_ERROR' as const,
+              code: 'SESSION_CREATION_FAILED' as const,
               message: String(event.error),
             }),
           }),
         },
       },
-    },
-
-    waitingForParticipants: {
-      after: {
-        PARTICIPANT_TIMEOUT: {
-          target: 'timeout',
-        },
-      },
       on: {
-        PARTICIPANT_JOINED: {
-          actions: assign({
-            session: ({ context, event }) => {
-              if (!context.session) return null;
-              return {
-                ...context.session,
-                participants: [
-                  ...context.session.participants,
-                  {
-                    pubkey: '',
-                    participantId: event.participantId,
-                    hasCommitment: false,
-                    hasSignatureShare: false,
-                    joinedAt: Date.now(),
-                  },
-                ],
-              };
-            },
-          }),
-        },
-        PARTICIPANT_LEFT: {
-          actions: assign({
-            session: ({ context, event }) => {
-              if (!context.session) return null;
-              return {
-                ...context.session,
-                participants: context.session.participants.filter(
-                  (p) => p.participantId !== event.participantId
-                ),
-              };
-            },
-          }),
-        },
-        START_SIGNING: {
-          target: 'collectingRound1',
-          guard: 'hasEnoughParticipants',
-          actions: ['setSigningParams', 'resetRetryCount'],
-        },
-        CANCEL: {
-          target: 'closing',
+        UI_CANCEL: {
+          target: 'idle',
+          actions: assign(({ context }) => createInitialCoordinatorContext(context.coordinatorPubkey)),
         },
       },
     },
 
-    collectingRound1: {
-      entry: assign({
-        commitments: () => new Map(),
-      }),
-      invoke: {
-        id: 'startSigning',
-        src: 'startSigning',
-        input: ({ context }) => ({
-          sessionId: context.sessionId!,
-          message: context.message!,
-          signerIds: context.selectedSigners,
-        }),
-        onError: {
-          target: 'error',
+    waiting: {
+      after: {
+        600000: { // SESSION_TIMEOUT
+          target: 'failed',
           actions: assign({
-            error: ({ event }) => ({
-              code: 'UNKNOWN_ERROR' as const,
-              message: String(event.error),
-            }),
+            error: () => ({ code: 'SESSION_EXPIRED' as const, message: 'Session timed out' }),
           }),
         },
       },
-      after: {
-        ROUND_TIMEOUT: {
-          target: 'timeout',
-        },
-      },
       on: {
-        COMMITMENT_RECEIVED: {
-          actions: 'addCommitment',
+        UI_START_SIGNING: {
+          target: 'round1Collect',
+          actions: assign({
+            message: ({ event }) => event.message,
+            selectedSignerIds: ({ event }) => event.signerIds,
+            commitments: () => new Map(),
+            signatureShares: () => new Map(),
+            phase: () => 'round1' as ProtocolPhase,
+          }),
         },
-        ALL_COMMITMENTS_RECEIVED: {
-          target: 'sendingRound2',
-          guard: 'hasAllCommitments',
-        },
-        PARTICIPANT_LEFT: [
+        UI_CANCEL: { target: 'closing' },
+      },
+    },
+
+    round1Collect: {
+      after: {
+        120000: [ // ROUND1_TIMEOUT
           {
-            target: 'error',
-            guard: 'isParticipantDrop',
+            target: 'failed',
+            guard: ({ context }) => context.commitments.size < context.threshold,
             actions: assign({
-              error: () => ({
-                code: 'THRESHOLD_NOT_MET' as const,
-                message: 'A required signer left the session',
-              }),
+              error: () => ({ code: 'ROUND1_TIMEOUT' as const, message: 'Round 1 timed out' }),
             }),
           },
+          { target: 'round2Send' },
         ],
-        CANCEL: {
-          target: 'closing',
-        },
       },
-      always: [
-        {
-          target: 'sendingRound2',
-          guard: 'hasAllCommitments',
-        },
-      ],
-    },
-
-    sendingRound2: {
-      // Broadcast commitments to all participants
-      // This is handled by the UI connecting the event
       on: {
-        ROUND2_STARTED: {
-          target: 'collectingRound2',
+        RX_ROUND1_COMMITMENT: {
+          guard: ({ context, event }) => context.selectedSignerIds.includes(event.participantId),
+          actions: assign({
+            commitments: ({ context, event }) => {
+              const newMap = new Map(context.commitments);
+              newMap.set(event.participantId, {
+                participantId: event.participantId,
+                hiding: event.hiding,
+                binding: event.binding,
+              });
+              return newMap;
+            },
+          }),
         },
-        ERROR: {
-          target: 'error',
-          actions: 'setError',
+        RX_ABORT: {
+          target: 'failed',
+          actions: assign({
+            error: ({ event }) => ({
+              code: 'ABORTED' as const,
+              message: event.message,
+              details: { reason: event.reason },
+            }),
+          }),
         },
-        CANCEL: {
-          target: 'closing',
-        },
+        UI_CANCEL: { target: 'aborting' },
+      },
+      always: {
+        target: 'round2Send',
+        guard: ({ context }) => context.commitments.size >= context.selectedSignerIds.length,
       },
     },
 
-    collectingRound2: {
+    round2Send: {
+      entry: assign({ phase: () => 'commitments_sent' as ProtocolPhase }),
+      invoke: {
+        id: 'sendCommitmentsSet',
+        src: sendMessageActor,
+        input: ({ context }) => ({
+          sessionId: context.sessionId!,
+          message: createCommitmentsSet(
+            context.sessionId!,
+            context.coordinatorPubkey,
+            Array.from(context.commitments.values()),
+            context.message!
+          ),
+          recipients: context.participantPubkeys,
+        }),
+        onDone: { target: 'round2Collect' },
+        onError: {
+          target: 'failed',
+          actions: assign({
+            error: ({ event }) => ({
+              code: 'THRESHOLD_NOT_MET' as const,
+              message: `Failed to send: ${event.error}`,
+            }),
+          }),
+        },
+      },
+      on: { UI_CANCEL: { target: 'aborting' } },
+    },
+
+    round2Collect: {
       entry: assign({
+        phase: () => 'round2' as ProtocolPhase,
         signatureShares: () => new Map(),
       }),
       after: {
-        ROUND_TIMEOUT: {
-          target: 'timeout',
-        },
-      },
-      on: {
-        SIGNATURE_SHARE_RECEIVED: {
-          actions: 'addSignatureShare',
-        },
-        ALL_SHARES_RECEIVED: {
-          target: 'aggregating',
-          guard: 'hasAllShares',
-        },
-        PARTICIPANT_LEFT: [
+        120000: [ // ROUND2_TIMEOUT
           {
-            target: 'error',
-            guard: 'isParticipantDrop',
+            target: 'failed',
+            guard: ({ context }) => context.signatureShares.size < context.threshold,
             actions: assign({
-              error: () => ({
-                code: 'THRESHOLD_NOT_MET' as const,
-                message: 'A required signer left the session',
-              }),
+              error: () => ({ code: 'ROUND2_TIMEOUT' as const, message: 'Round 2 timed out' }),
             }),
           },
+          { target: 'aggregating' },
         ],
-        CANCEL: {
-          target: 'closing',
-        },
       },
-      always: [
-        {
-          target: 'aggregating',
-          guard: 'hasAllShares',
+      on: {
+        RX_ROUND2_SIGNATURE_SHARE: {
+          guard: ({ context, event }) =>
+            context.selectedSignerIds.includes(event.participantId) &&
+            context.commitments.has(event.participantId),
+          actions: assign({
+            signatureShares: ({ context, event }) => {
+              const newMap = new Map(context.signatureShares);
+              newMap.set(event.participantId, {
+                participantId: event.participantId,
+                share: event.share,
+              });
+              return newMap;
+            },
+          }),
         },
-      ],
+        RX_ABORT: {
+          target: 'failed',
+          actions: assign({
+            error: ({ event }) => ({
+              code: 'ABORTED' as const,
+              message: event.message,
+            }),
+          }),
+        },
+        UI_CANCEL: { target: 'aborting' },
+      },
+      always: {
+        target: 'aggregating',
+        guard: ({ context }) => context.signatureShares.size >= context.selectedSignerIds.length,
+      },
     },
 
     aggregating: {
       invoke: {
         id: 'aggregateSignature',
-        src: 'aggregateSignature',
+        src: aggregateSignatureActor,
         input: ({ context }) => ({
-          sessionId: context.sessionId!,
+          message: context.message!,
+          commitments: Array.from(context.commitments.values()),
+          shares: Array.from(context.signatureShares.values()),
         }),
         onDone: {
-          target: 'complete',
+          target: 'broadcasting',
           actions: assign({
-            aggregateSignature: ({ event }) => event.output,
+            aggregateSignature: ({ event }) => event.output.signature,
+            verified: ({ event }) => event.output.verified,
           }),
         },
         onError: {
-          target: 'error',
+          target: 'failed',
           actions: assign({
             error: ({ event }) => ({
-              code: 'INVALID_SIGNATURE' as const,
+              code: 'AGGREGATION_FAILED' as const,
               message: String(event.error),
             }),
+            abortReason: () => 'aggregation_failed' as AbortReason,
           }),
         },
+      },
+    },
+
+    broadcasting: {
+      invoke: {
+        id: 'sendSignatureResult',
+        src: sendMessageActor,
+        input: ({ context }) => ({
+          sessionId: context.sessionId!,
+          message: createSignatureResult(
+            context.sessionId!,
+            context.coordinatorPubkey,
+            context.aggregateSignature!,
+            context.message!,
+            context.verified
+          ),
+          recipients: context.participantPubkeys,
+        }),
+        onDone: { target: 'complete' },
+        onError: { target: 'complete' }, // Still complete - signature is valid
       },
     },
 
     complete: {
       type: 'final',
-      entry: assign({
-        session: ({ context }) => {
-          if (!context.session) return null;
-          return { ...context.session, state: 'completed' as const };
-        },
-      }),
+      entry: assign({ phase: () => 'complete' as ProtocolPhase }),
     },
 
-    timeout: {
-      on: {
-        RETRY: [
-          {
-            target: 'collectingRound1',
-            guard: 'canRetry',
-            actions: ['incrementRetry', 'clearSigningState'],
-          },
-          {
-            target: 'error',
-            actions: assign({
-              error: () => ({
-                code: 'SESSION_EXPIRED' as const,
-                message: 'Maximum retries exceeded',
-              }),
-            }),
-          },
-        ],
-        CANCEL: {
-          target: 'closing',
-        },
+    aborting: {
+      invoke: {
+        id: 'sendAbort',
+        src: sendMessageActor,
+        input: ({ context }) => ({
+          sessionId: context.sessionId!,
+          message: createAbort(
+            context.sessionId!,
+            context.coordinatorPubkey,
+            context.abortReason ?? 'user_cancelled',
+            context.error?.message ?? 'Ceremony aborted',
+            context.error?.details
+          ),
+          recipients: context.participantPubkeys,
+        }),
+        onDone: { target: 'closing' },
+        onError: { target: 'closing' },
       },
     },
 
-    error: {
+    failed: {
       on: {
-        RETRY: [
-          {
-            target: 'waitingForParticipants',
-            guard: 'canRetry',
-            actions: ['incrementRetry', 'clearError', 'clearSigningState'],
-          },
-        ],
-        CANCEL: {
-          target: 'closing',
-        },
-        RESET: {
+        UI_RESET: {
           target: 'idle',
-          actions: 'resetContext',
+          actions: assign(({ context }) => createInitialCoordinatorContext(context.coordinatorPubkey)),
         },
+        UI_CANCEL: { target: 'closing' },
       },
     },
 
     closing: {
       invoke: {
         id: 'closeSession',
-        src: 'closeSession',
-        input: ({ context }) => ({
-          sessionId: context.sessionId!,
-        }),
+        src: closeSessionActor,
+        input: ({ context }) => ({ sessionId: context.sessionId! }),
         onDone: {
           target: 'idle',
-          actions: 'resetContext',
+          actions: assign(({ context }) => createInitialCoordinatorContext(context.coordinatorPubkey)),
         },
         onError: {
           target: 'idle',
-          actions: 'resetContext',
+          actions: assign(({ context }) => createInitialCoordinatorContext(context.coordinatorPubkey)),
         },
       },
     },
@@ -610,4 +466,5 @@ export const coordinatorMachine = setup({
 });
 
 export type CoordinatorMachine = typeof coordinatorMachine;
-export type CoordinatorState = ReturnType<typeof coordinatorMachine.transition>;
+export type CoordinatorActor = ActorRefFrom<typeof coordinatorMachine>;
+export type CoordinatorSnapshot = ReturnType<typeof coordinatorMachine.getInitialSnapshot>;
