@@ -627,10 +627,8 @@ fn verify_internal(
     // Create randomized params for verification
     let randomized_params = frost::RandomizedParams::from_randomizer(&group_key, randomizer);
 
-    // Verify with randomized key
-    let randomized_key = randomized_params.randomized_verifying_key();
-
-    match randomized_key.verify(&message, &signature) {
+    // Use top-level verify function (randomized_verifying_key() not available in this API)
+    match frost::verify(&message, &signature, &group_key, &randomized_params) {
         Ok(()) => Ok(true),
         Err(_) => Ok(false),
     }
