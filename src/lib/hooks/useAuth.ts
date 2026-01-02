@@ -272,12 +272,14 @@ export function useFrostClient(): FrostClient | null {
 
   useEffect(() => {
     if (!accessToken) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setClient(null);
       return;
     }
 
     const newClient = new FrostClient({ baseUrl: frostdUrl });
     newClient.setAccessToken(accessToken, tokenExpiresAt ?? undefined);
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setClient(newClient);
   }, [frostdUrl, accessToken, tokenExpiresAt]);
 

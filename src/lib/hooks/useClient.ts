@@ -27,6 +27,7 @@ export function useClient(): UnifiedClient | null {
     if (demoMode) {
       // Create mock client
       const mockClient = new MockFrostClient({ baseUrl: frostdUrl });
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setClient(mockClient);
     } else {
       // Create real client
@@ -34,6 +35,7 @@ export function useClient(): UnifiedClient | null {
       if (accessToken) {
         realClient.setAccessToken(accessToken, tokenExpiresAt ?? undefined);
       }
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setClient(realClient);
     }
   }, [demoMode, frostdUrl, accessToken, tokenExpiresAt]);
