@@ -2,7 +2,7 @@
 name = "frost-wasm"
 version = "0.1.0"
 edition = "2021"
-description = "WASM bindings for FROST threshold signatures"
+description = "WASM bindings for FROST threshold signatures for Zcash"
 license = "MIT OR Apache-2.0"
 
 [lib]
@@ -12,9 +12,9 @@ crate-type = ["cdylib", "rlib"]
 default = ["console_error_panic_hook"]
 
 [dependencies]
-# FROST cryptography - using Ed25519 for now (Zcash uses different curves but Ed25519 is simpler to start)
-frost-ed25519 = { version = "2.1", default-features = false }
-frost-core = { version = "2.1", default-features = false }
+# FROST cryptography for Zcash RedPallas (Orchard-compatible)
+# reddsa provides frost::redpallas which uses frost-rerandomized internally
+reddsa = { version = "0.5", features = ["frost", "serde"] }
 
 # WASM bindings
 wasm-bindgen = "0.2"
@@ -31,6 +31,7 @@ console_error_panic_hook = { version = "0.1", optional = true }
 # Random number generation for WASM
 getrandom = { version = "0.2", features = ["js"] }
 rand = "0.8"
+rand_core = "0.6"
 
 # Hex encoding
 hex = "0.4"
