@@ -5,8 +5,8 @@ export class Keypair {
   private constructor();
   free(): void;
   [Symbol.dispose](): void;
-  readonly public_key: Uint8Array;
   readonly private_key: Uint8Array;
+  readonly public_key: Uint8Array;
 }
 
 /**
@@ -58,18 +58,18 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 export interface InitOutput {
   readonly memory: WebAssembly.Memory;
   readonly __wbg_keypair_free: (a: number, b: number) => void;
-  readonly generate_keypair: () => number;
-  readonly get_public_key: (a: number, b: number) => [number, number, number, number];
   readonly keypair_private_key: (a: number) => [number, number];
   readonly keypair_public_key: (a: number) => [number, number];
+  readonly generate_keypair: () => number;
+  readonly get_public_key: (a: number, b: number) => [number, number, number, number];
   readonly sign: (a: number, b: number, c: number, d: number) => [number, number, number, number];
   readonly verify: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number];
   readonly __wbindgen_exn_store: (a: number) => void;
   readonly __externref_table_alloc: () => number;
   readonly __wbindgen_externrefs: WebAssembly.Table;
+  readonly __wbindgen_free: (a: number, b: number, c: number) => void;
   readonly __wbindgen_malloc: (a: number, b: number) => number;
   readonly __externref_table_dealloc: (a: number) => void;
-  readonly __wbindgen_free: (a: number, b: number, c: number) => void;
   readonly __wbindgen_start: () => void;
 }
 

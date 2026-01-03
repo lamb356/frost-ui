@@ -114,15 +114,15 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 
 export interface InitOutput {
   readonly memory: WebAssembly.Memory;
-  readonly aggregate_signature: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
-  readonly create_signing_package: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number];
+  readonly init: () => void;
   readonly generate_key_shares: (a: number, b: number) => [number, number];
   readonly generate_round1_commitment: (a: number, b: number) => [number, number];
+  readonly create_signing_package: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number];
   readonly generate_round2_signature: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
-  readonly get_group_public_key: (a: number, b: number) => [number, number];
-  readonly get_public_key: (a: number, b: number) => [number, number];
-  readonly init: () => void;
+  readonly aggregate_signature: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
   readonly verify_signature: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
+  readonly get_public_key: (a: number, b: number) => [number, number];
+  readonly get_group_public_key: (a: number, b: number) => [number, number];
   readonly __wbindgen_exn_store: (a: number) => void;
   readonly __externref_table_alloc: () => number;
   readonly __wbindgen_externrefs: WebAssembly.Table;

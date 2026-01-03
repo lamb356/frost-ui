@@ -94,8 +94,8 @@ export class Keypair {
     /**
      * @returns {Uint8Array}
      */
-    get public_key() {
-        const ret = wasm.keypair_public_key(this.__wbg_ptr);
+    get private_key() {
+        const ret = wasm.keypair_private_key(this.__wbg_ptr);
         var v1 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
         wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
         return v1;
@@ -103,8 +103,8 @@ export class Keypair {
     /**
      * @returns {Uint8Array}
      */
-    get private_key() {
-        const ret = wasm.keypair_private_key(this.__wbg_ptr);
+    get public_key() {
+        const ret = wasm.keypair_public_key(this.__wbg_ptr);
         var v1 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
         wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
         return v1;
