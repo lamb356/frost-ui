@@ -128,20 +128,34 @@ npm run build
 
 ## Testing
 
-The project includes comprehensive test suites:
+### CI Tests (automated)
+
+The following tests run automatically in CI after WASM is built:
+
+```bash
+npm test  # Runs Zcash WASM tests (9 tests)
+```
+
+### Integration Tests (manual, requires frostd)
+
+These tests require a running frostd server (see setup below):
 
 ```bash
 # Ed25519 signing ceremony against live frostd (33 tests)
-npx tsx scripts/test-ceremony.ts https://localhost:2745
-
-# Zcash/Orchard local WASM test (9 tests)
-npx tsx scripts/test-zcash-ceremony.ts
+npm run test:ed25519 -- https://localhost:2745
 
 # Zcash/Orchard signing ceremony against live frostd (34 tests)
-npx tsx scripts/test-zcash-ceremony-live.ts https://localhost:2745
+npm run test:zcash-live -- https://localhost:2745
 ```
 
-Total: 76+ tests covering cryptographic correctness and protocol flow.
+### Test Summary
+
+| Suite | Tests | CI | Description |
+|-------|-------|-----|-------------|
+| Zcash WASM | 9 | Yes | Local cryptographic correctness |
+| Ed25519 Live | 33 | Manual | Full ceremony against frostd |
+| Zcash Live | 34 | Manual | Full Orchard ceremony against frostd |
+| **Total** | **76+** | | |
 
 ## Testing with frostd
 
