@@ -40,7 +40,7 @@ A Next.js web application for FROST (Flexible Round-Optimized Schnorr Threshold)
 
 ### Prerequisites
 
-- Node.js 20+ (required by dependencies)
+- Node.js >= 20.19.0 (required by @noble/curves, @noble/hashes)
 - npm or yarn
 
 ### Installation
