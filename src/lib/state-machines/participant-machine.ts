@@ -123,7 +123,7 @@ export type ParticipantEvent =
   | { type: 'UI_CANCEL' }
   | { type: 'UI_RESET' }
   | { type: 'RX_SIGNING_PACKAGE'; message: string; signerIds: number[]; coordinatorPubkey: string; msgId: string }
-  | { type: 'RX_COMMITMENTS_SET'; commitments: InternalCommitment[]; message: string; signingPackage?: string; randomizer?: string; groupPublicKey?: string }
+  | { type: 'RX_COMMITMENTS_SET'; commitments: InternalCommitment[]; signingPackage?: string; randomizer?: string; groupPublicKey?: string }
   | { type: 'RX_SIGNATURE_RESULT'; signature: string; verified: boolean }
   | { type: 'RX_ABORT'; reason: AbortReason; message: string }
   | { type: 'ROUND1_GENERATED'; nonces: SigningNonces; commitment: InternalCommitment }
@@ -425,8 +425,9 @@ export const participantMachine = createMachine({
           {
             target: 'confirm',
             guard: ({ context, event }) => {
-              // Verify message matches
-              if (event.message !== context.signingMessage) return false;
+              // Note: message validation is done via message_id linkage, not by echoing message
+              // The signing_package contains the message, so we don't need to check event.message
+
               // Verify our commitment is in the set
               const ourCommitment = event.commitments.find(c => c.participantId === context.participantId);
               if (!ourCommitment) return false;

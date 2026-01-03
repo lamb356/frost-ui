@@ -62,19 +62,30 @@ context.nonceMessageId = payload.message_id;  // Bind nonces to this message_id
 
 ### Message Deduplication
 
-All messages include a unique `id` field (UUID). The validation module maintains a deduplication set:
+All messages include a unique `id` field (UUID). The validation module maintains a deduplication set keyed by `${sessionId}:${messageId}`:
 
 ```typescript
 // validation.ts
 class DeduplicationSet {
-  private seen: Set<string> = new Set();
-  private maxSize: number = 10000;
+  private seen = new Set<string>();
+  private maxSize = 10000;
 
-  isDuplicate(messageId: string): boolean {
-    if (this.seen.has(messageId)) return true;
-    this.seen.add(messageId);
-    // Evict oldest entries if over limit
-    return false;
+  // Check if message was already seen
+  hasSeen(sid: string, id: string): boolean {
+    return this.seen.has(`${sid}:${id}`);
+  }
+
+  // Mark message as seen, returns false if already seen (duplicate)
+  markSeen(sid: string, id: string): boolean {
+    const key = `${sid}:${id}`;
+    if (this.seen.has(key)) return false;
+    // Evict oldest entries if at capacity
+    if (this.seen.size >= this.maxSize) {
+      const firstKey = this.seen.values().next().value;
+      if (firstKey) this.seen.delete(firstKey);
+    }
+    this.seen.add(key);
+    return true;
   }
 }
 ```

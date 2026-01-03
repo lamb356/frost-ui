@@ -104,7 +104,7 @@ export type CoordinatorErrorCode =
 
 export type CoordinatorEvent =
   | { type: 'UI_START'; participantPubkeys: string[]; threshold: number }
-  | { type: 'UI_START_SIGNING'; message: string; signerIds: number[] }
+  | { type: 'UI_START_SIGNING'; message: string; signerIds: number[]; messageId: string }
   | { type: 'UI_CANCEL' }
   | { type: 'UI_RESET' }
   | { type: 'RX_ROUND1_COMMITMENT'; participantId: number; hiding: string; binding: string }
@@ -171,6 +171,17 @@ export const sendMessageActor = fromPromise<
   { sessionId: string; message: FrostMessage; recipients: string[] }
 >(async () => {
   throw new Error('sendMessageActor must be provided via machine options');
+});
+
+export const createSigningPackageActor = fromPromise<
+  { signingPackage: string; randomizer: string },
+  {
+    message: string;
+    commitments: InternalCommitment[];
+    publicKeyPackage?: string;
+  }
+>(async () => {
+  throw new Error('createSigningPackageActor must be provided via machine options');
 });
 
 export const aggregateSignatureActor = fromPromise<
@@ -267,7 +278,7 @@ export const coordinatorMachine = createMachine({
           actions: assign({
             message: ({ event }) => event.message,
             selectedSignerIds: ({ event }) => event.signerIds,
-            messageId: () => crypto.randomUUID(),  // Generate unique message_id for this signing attempt
+            messageId: ({ event }) => event.messageId,  // Use messageId from useSigning
             commitments: () => new Map(),
             signatureShares: () => new Map(),
             phase: () => 'round1' as ProtocolPhase,
@@ -287,7 +298,7 @@ export const coordinatorMachine = createMachine({
               error: () => ({ code: 'ROUND1_TIMEOUT' as const, message: 'Round 1 timed out' }),
             }),
           },
-          { target: 'round2Send' },
+          { target: 'creatingSigningPackage' },
         ],
       },
       on: {
@@ -318,9 +329,38 @@ export const coordinatorMachine = createMachine({
         UI_CANCEL: { target: 'aborting' },
       },
       always: {
-        target: 'round2Send',
+        target: 'creatingSigningPackage',
         guard: ({ context }) => context.commitments.size >= context.selectedSignerIds.length,
       },
+    },
+
+    creatingSigningPackage: {
+      invoke: {
+        id: 'createSigningPackage',
+        src: createSigningPackageActor,
+        input: ({ context }) => ({
+          message: context.message!,
+          commitments: Array.from(context.commitments.values()),
+          publicKeyPackage: context.publicKeyPackage || undefined,
+        }),
+        onDone: {
+          target: 'round2Send',
+          actions: assign({
+            signingPackage: ({ event }) => event.output.signingPackage,
+            randomizer: ({ event }) => event.output.randomizer,
+          }),
+        },
+        onError: {
+          target: 'failed',
+          actions: assign({
+            error: ({ event }) => ({
+              code: 'AGGREGATION_FAILED' as const,
+              message: `Failed to create signing package: ${event.error}`,
+            }),
+          }),
+        },
+      },
+      on: { UI_CANCEL: { target: 'aborting' } },
     },
 
     round2Send: {

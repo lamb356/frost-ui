@@ -26,11 +26,7 @@ import {
   type KeyPackage,
   type SigningNonces,
 } from '@/lib/state-machines/participant-machine';
-import type {
-  FrostMessage,
-  WasmCommitment,
-  WasmSignatureShare,
-} from '@/types/messages';
+import type { FrostMessage } from '@/types/messages';
 import {
   createSigningPackage,
   isMessageType,
@@ -41,7 +37,7 @@ import {
 import { loadFrostShare } from '@/lib/crypto/keystore';
 import {
   DeduplicationSet,
-  validateEnvelope,
+  validateMessage,
 } from '@/lib/state-machines/validation';
 
 // =============================================================================
@@ -227,37 +223,92 @@ export function useSigning(): UseSigningResult {
                 const hexMsg = messageToHex(message);
                 await client.send(sid, recipients, hexMsg);
               }),
+              createSigningPackage: fromPromise(async ({ input }) => {
+                // Create signing package from collected commitments
+                const typedInput = input as {
+                  message: string;
+                  commitments: { participantId: number; hiding: string; binding: string }[];
+                  publicKeyPackage?: string;
+                };
+
+                // For Ed25519, we don't need to call backend - just construct the package
+                if (!backend.createSigningPackage) {
+                  // Ed25519: Create signing package manually
+                  const signingPackage = JSON.stringify({
+                    message: typedInput.message,
+                    commitments: typedInput.commitments.map((c) => ({
+                      identifier: c.participantId,
+                      hiding: c.hiding,
+                      binding: c.binding,
+                    })),
+                  });
+                  return {
+                    signingPackage,
+                    randomizer: '',
+                  };
+                }
+
+                // Orchard: Call backend to create signing package with randomizer
+                // Convert array to Record<string, string> format
+                const commitmentsRecord: Record<string, string> = {};
+                typedInput.commitments.forEach((c) => {
+                  commitmentsRecord[String(c.participantId)] = JSON.stringify({
+                    identifier: c.participantId,
+                    hiding: c.hiding,
+                    binding: c.binding,
+                  });
+                });
+
+                if (!typedInput.publicKeyPackage) {
+                  throw new Error('publicKeyPackage required for Orchard signing');
+                }
+
+                const result = await backend.createSigningPackage(
+                  typedInput.message,
+                  commitmentsRecord,
+                  typedInput.publicKeyPackage
+                );
+                return {
+                  signingPackage: result.signingPackage,
+                  randomizer: result.randomizer || '',
+                };
+              }),
               aggregateSignature: fromPromise(async ({ input }) => {
-                // The coordinator machine passes commitments/shares from context
-                // These are stored in WASM format (from Round 1/2 results)
+                // The coordinator machine passes internal format from context
                 const { message, commitments, shares, publicKeyPackage, randomizer } = input as {
                   message: string;
-                  commitments: WasmCommitment[];
-                  shares: WasmSignatureShare[];
+                  commitments: InternalCommitment[];
+                  shares: InternalSignatureShare[];
                   publicKeyPackage: string;
                   randomizer?: string;
                 };
-                // Create signing package in WASM format
+
+                // Convert internal commitments to signing package format
                 const signingPackage = JSON.stringify({
                   message,
-                  commitments: commitments.map((c: WasmCommitment) => ({
-                    identifier: c.identifier,
-                    commitment: c.commitment,
+                  commitments: commitments.map((c) => ({
+                    identifier: c.participantId,
+                    hiding: c.hiding,
+                    binding: c.binding,
                   })),
                 });
+
+                // Convert internal shares to Record format for backend
                 const sharesRecord: Record<string, string> = {};
-                shares.forEach((s: WasmSignatureShare) => {
-                  sharesRecord[String(s.identifier)] = JSON.stringify({
-                    identifier: s.identifier,
+                shares.forEach((s) => {
+                  sharesRecord[String(s.participantId)] = JSON.stringify({
+                    identifier: s.participantId,
                     share: s.share,
                   });
                 });
+
                 const signature = await backend.aggregateSignature(
                   signingPackage,
                   sharesRecord,
                   publicKeyPackage,
                   randomizer
                 );
+
                 // Get group public key from publicKeyPackage for verification
                 const pkgParsed = JSON.parse(publicKeyPackage);
                 const groupPublicKey = pkgParsed.group_public_key || pkgParsed.groupPublicKey || '';
@@ -397,7 +448,7 @@ export function useSigning(): UseSigningResult {
       client.send(ctx.sessionId, recipients, hexMsg);
     }
 
-    actor.send({ type: 'UI_START_SIGNING', message, signerIds });
+    actor.send({ type: 'UI_START_SIGNING', message, signerIds, messageId });
   }, [client, pubkey, state.backendId]);
 
   // ==========================================================================
@@ -482,9 +533,12 @@ export function useSigning(): UseSigningResult {
                   message: string;
                   allCommitments: InternalCommitment[];
                   signerIds: number[];
+                  signingPackage?: string;
+                  randomizer?: string;
                 };
 
-                const signingPackage = JSON.stringify({
+                // Use signing_package from COMMITMENTS_SET if available, otherwise construct from commitments
+                const signingPackage = typedInput.signingPackage || JSON.stringify({
                   message: typedInput.message,
                   commitments: typedInput.allCommitments.map((c: InternalCommitment) => ({
                     identifier: c.participantId,
@@ -506,7 +560,7 @@ export function useSigning(): UseSigningResult {
                   }),
                   nonces,
                   signingPackage,
-                  undefined // randomizer for Orchard
+                  typedInput.randomizer // Use randomizer from COMMITMENTS_SET for Orchard
                 );
 
                 const parsed = JSON.parse(result);
@@ -636,31 +690,24 @@ export function useSigning(): UseSigningResult {
               const decoded = hexToMessage(msg.msg);
               if (!decoded) continue;
 
-              // === INGRESS VALIDATION ===
-              // 1. Validate message envelope structure
-              const envelopeResult = validateEnvelope(decoded);
-              if (!envelopeResult.valid) {
-                console.warn('Invalid message envelope:', envelopeResult.error.message);
-                continue;
-              }
+              // === FULL INGRESS VALIDATION ===
+              // validateMessage includes: envelope, freshness, session binding, deduplication
+              const validationResult = validateMessage(decoded, {
+                expectedSessionId: sessionId,
+                dedupeSet: dedupeSetRef.current,
+                checkFreshness: true,
+              });
 
-              // 2. Check session ID matches
-              if (decoded.sid !== sessionId) {
-                console.warn('Message session ID mismatch:', decoded.sid, 'expected', sessionId);
-                continue;
-              }
-
-              // 3. Deduplication check (markSeen returns false if already seen)
-              if (!dedupeSetRef.current.markSeen(decoded.sid, decoded.id)) {
-                console.debug('Duplicate message ignored:', decoded.id);
+              if (!validationResult.valid) {
+                console.warn('Message validation failed:', validationResult.error.message);
                 continue;
               }
 
               // Dispatch to appropriate actor
               if (asCoordinator && coordinatorActorRef.current) {
-                handleCoordinatorMessage(decoded);
+                handleCoordinatorMessage(validationResult.message);
               } else if (!asCoordinator && participantActorRef.current) {
-                handleParticipantMessage(decoded);
+                handleParticipantMessage(validationResult.message);
               }
             }
           } catch (err) {
@@ -746,15 +793,13 @@ export function useSigning(): UseSigningResult {
           binding: data.binding || '',
         };
       });
-      // Cast through unknown because machine types need updating to match new wire format
       actor.send({
         type: 'RX_COMMITMENTS_SET',
         commitments: internalCommitments,
-        message: '', // Message is in signing_package, not echoed in new format
         signingPackage: payload.signing_package,
         randomizer: payload.randomizer,
         groupPublicKey: payload.group_public_key,
-      } as unknown as ParticipantEvent);
+      } as ParticipantEvent);
     } else if (isMessageType(msg, 'SIGNATURE_RESULT')) {
       const payload = msg.payload;
       actor.send({
