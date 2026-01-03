@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test": "echo 'Run: npx tsx scripts/test-ceremony.ts https://localhost:2745' && echo 'Run: npx tsx scripts/test-zcash-ceremony.ts' && echo 'Run: npx tsx scripts/test-zcash-ceremony-live.ts https://localhost:2745'",
+    "test": "npm run test:zcash",
     "test:ed25519": "npx tsx scripts/test-ceremony.ts",
     "test:zcash": "npx tsx scripts/test-zcash-ceremony.ts",
     "test:zcash-live": "npx tsx scripts/test-zcash-ceremony-live.ts"

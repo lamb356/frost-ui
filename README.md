@@ -47,7 +47,7 @@ A Next.js web application for FROST (Flexible Round-Optimized Schnorr Threshold)
 
 ```bash
 # Clone the repository
-git clone https://github.com/YOUR_USERNAME/frost-ui.git
+git clone https://github.com/lamb356/frost-ui.git
 cd frost-ui
 
 # Install dependencies
@@ -175,7 +175,7 @@ mkcert localhost
 frostd --cert localhost.pem --key localhost-key.pem
 ```
 
-Default port is 2743.
+Default port is 2745.
 
 ### 4. Run Smoke Test
 
@@ -184,7 +184,7 @@ Default port is 2743.
 npx tsx scripts/test-frostd.ts
 
 # Or specify a custom URL
-npx tsx scripts/test-frostd.ts https://localhost:2743
+npx tsx scripts/test-frostd.ts https://localhost:2745
 ```
 
 The smoke test validates the complete authentication and session flow:

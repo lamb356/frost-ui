@@ -34,6 +34,9 @@ jobs:
           # Skip type checking for WASM imports that may not exist yet
           NEXT_TELEMETRY_DISABLED: 1
 
+      - name: Run Zcash WASM tests
+        run: npm run test:zcash
+
   # Job 2: Build WASM modules (frost-wasm and xeddsa-wasm)
   build-wasm:
     name: Build WASM
