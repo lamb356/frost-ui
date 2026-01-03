@@ -40,7 +40,7 @@ A Next.js web application for FROST (Flexible Round-Optimized Schnorr Threshold)
 
 ### Prerequisites
 
-- Node.js 18+
+- Node.js 18+ (CI uses Node 20)
 - npm or yarn
 
 ### Installation

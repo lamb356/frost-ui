@@ -11,10 +11,29 @@ jobs:
   test-nextjs:
     name: Test Next.js
     runs-on: ubuntu-latest
+    needs: build-wasm
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Download FROST WASM artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: frost-wasm-pkg
+          path: src/lib/frost-wasm/pkg/
+
+      - name: Download XEdDSA WASM artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: xeddsa-wasm-pkg
+          path: src/lib/xeddsa-wasm/pkg/
+
+      - name: Download FROST Zcash WASM artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: frost-zcash-wasm-pkg
+          path: src/lib/frost-zcash-wasm/pkg/
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -31,7 +50,6 @@ jobs:
       - name: Build Next.js app
         run: npm run build
         env:
-          # Skip type checking for WASM imports that may not exist yet
           NEXT_TELEMETRY_DISABLED: 1
 
       - name: Run Zcash WASM tests
