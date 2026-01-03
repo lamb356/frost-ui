@@ -444,7 +444,11 @@ function CoordinatorWaiting({ signing }: { signing: ReturnType<typeof useSigning
 
   const selectedGroup = availableGroups.find(g => g.groupId === selectedGroupId);
   const hasValidGroup = selectedGroup && selectedGroup.publicKeyPackage;
-  const canStart = messageToSign.length >= 2 && hasValidGroup;
+
+  // Hex validation for messageToSign
+  const isValidHex = (s: string) => /^[0-9a-fA-F]*$/.test(s) && s.length % 2 === 0;
+  const messageValid = messageToSign.length >= 2 && isValidHex(messageToSign);
+  const canStart = messageValid && hasValidGroup;
 
   const handleStart = () => {
     if (!selectedGroup) return;
@@ -518,8 +522,19 @@ function CoordinatorWaiting({ signing }: { signing: ReturnType<typeof useSigning
           onChange={(e) => setMessageToSign(e.target.value)}
           placeholder="Transaction sighash or message in hex format..."
           rows={4}
-          className="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-xl text-white placeholder-gray-500 focus:outline-none focus:border-amber-500 font-mono text-sm"
+          className={`w-full px-4 py-3 bg-gray-800 border rounded-xl text-white placeholder-gray-500 focus:outline-none font-mono text-sm ${
+            messageToSign.length > 0 && !messageValid
+              ? 'border-red-500 focus:border-red-500'
+              : 'border-gray-700 focus:border-amber-500'
+          }`}
         />
+        {messageToSign.length > 0 && !messageValid && (
+          <p className="text-red-400 text-xs mt-1">
+            {!isValidHex(messageToSign)
+              ? 'Invalid hex: must contain only 0-9, a-f, A-F characters and have even length'
+              : 'Message too short (minimum 2 characters)'}
+          </p>
+        )}
       </div>
 
       <div className="mb-6">

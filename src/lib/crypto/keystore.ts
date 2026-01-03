@@ -375,7 +375,7 @@ export async function changePassword(
     // Decrypt with old password
     const decrypted = await loadFrostShare(share.groupId, oldPassword);
 
-    // Save with new password
+    // Save with new password (preserve publicKeyPackage)
     await saveFrostShare(
       {
         groupId: share.groupId,
@@ -383,6 +383,7 @@ export async function changePassword(
         secretShare: decrypted.secretShare,
         publicKeyShare: decrypted.publicKeyShare,
         groupPublicKey: decrypted.groupPublicKey,
+        publicKeyPackage: decrypted.publicKeyPackage,
         threshold: decrypted.threshold,
         totalParticipants: decrypted.totalParticipants,
         name: decrypted.name,

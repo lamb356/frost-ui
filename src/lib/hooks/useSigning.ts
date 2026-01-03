@@ -38,6 +38,7 @@ import { loadFrostShare } from '@/lib/crypto/keystore';
 import {
   DeduplicationSet,
   validateMessage,
+  type ProtocolPhase,
 } from '@/lib/state-machines/validation';
 
 // =============================================================================
@@ -142,6 +143,12 @@ export function useSigning(): UseSigningResult {
   const keyPackageRef = useRef<KeyPackage | null>(null);
   const dedupeSetRef = useRef<DeduplicationSet>(new DeduplicationSet());
 
+  // Validation context refs - updated as ceremony progresses
+  const sessionIdRef = useRef<string | null>(null);
+  const expectedMessageIdRef = useRef<string | null>(null);
+  const backendIdRef = useRef<BackendId>(state.backendId);
+  const currentPhaseRef = useRef<ProtocolPhase>('idle');
+
   // Load backend on backendId change
   useEffect(() => {
     let mounted = true;
@@ -189,6 +196,8 @@ export function useSigning(): UseSigningResult {
       // Load backend
       const backend = await getBackend(backendId);
       backendRef.current = backend;
+      backendIdRef.current = backendId;
+      currentPhaseRef.current = 'idle';
 
       setState((prev) => ({
         ...prev,
@@ -206,6 +215,7 @@ export function useSigning(): UseSigningResult {
         );
 
         const sessionId = response.session_id;
+        sessionIdRef.current = sessionId;
 
         setState((prev) => ({
           ...prev,
@@ -448,6 +458,10 @@ export function useSigning(): UseSigningResult {
       client.send(ctx.sessionId, recipients, hexMsg);
     }
 
+    // Update validation context for coordinator
+    expectedMessageIdRef.current = messageId;
+    currentPhaseRef.current = 'round1';
+
     // Pass backendId, publicKeyPackage, groupPublicKey to coordinator machine
     actor.send({
       type: 'UI_START_SIGNING',
@@ -470,6 +484,10 @@ export function useSigning(): UseSigningResult {
         setState((prev) => ({ ...prev, error: 'Not authenticated' }));
         return;
       }
+
+      // Set validation context
+      sessionIdRef.current = sessionId;
+      currentPhaseRef.current = 'idle';
 
       setState((prev) => ({
         ...prev,
@@ -700,9 +718,12 @@ export function useSigning(): UseSigningResult {
               if (!decoded) continue;
 
               // === FULL INGRESS VALIDATION ===
-              // validateMessage includes: envelope, freshness, session binding, deduplication
+              // validateMessage includes: envelope, freshness, session binding, deduplication, phase
               const validationResult = validateMessage(decoded, {
-                expectedSessionId: sessionId,
+                expectedSessionId: sessionIdRef.current || sessionId,
+                expectedMessageId: expectedMessageIdRef.current || undefined,
+                expectedBackend: backendIdRef.current,
+                currentPhase: currentPhaseRef.current,
                 dedupeSet: dedupeSetRef.current,
                 checkFreshness: true,
               });
@@ -716,7 +737,7 @@ export function useSigning(): UseSigningResult {
               if (asCoordinator && coordinatorActorRef.current) {
                 handleCoordinatorMessage(validationResult.message);
               } else if (!asCoordinator && participantActorRef.current) {
-                handleParticipantMessage(validationResult.message);
+                await handleParticipantMessage(validationResult.message);
               }
             }
           } catch (err) {
@@ -768,21 +789,27 @@ export function useSigning(): UseSigningResult {
     }
   }, []);
 
-  const handleParticipantMessage = useCallback((msg: FrostMessage) => {
+  const handleParticipantMessage = useCallback(async (msg: FrostMessage) => {
     const actor = participantActorRef.current;
     if (!actor) return;
 
     if (isMessageType(msg, 'SIGNING_PACKAGE')) {
       const payload = msg.payload;
-      // Validate backendId matches
-      if (payload.backendId !== state.backendId) {
-        console.warn('Backend ID mismatch:', payload.backendId, 'vs', state.backendId);
-        // Update backend
+
+      // Handle backend switch - AWAIT before sending to machine (Issue 2 fix)
+      if (payload.backendId !== backendIdRef.current) {
+        console.log('Switching backend:', backendIdRef.current, '->', payload.backendId);
+        const newBackend = await getBackend(payload.backendId);
+        backendRef.current = newBackend;
+        backendIdRef.current = payload.backendId;
         setState((prev) => ({ ...prev, backendId: payload.backendId }));
-        getBackend(payload.backendId).then((backend) => {
-          backendRef.current = backend;
-        });
       }
+
+      // Update validation context for participant
+      expectedMessageIdRef.current = payload.message_id;
+      currentPhaseRef.current = 'round1';
+
+      // Now safe to send to machine
       actor.send({
         type: 'RX_SIGNING_PACKAGE',
         message: payload.message_to_sign,
@@ -802,6 +829,10 @@ export function useSigning(): UseSigningResult {
           binding: data.binding || '',
         };
       });
+
+      // Update phase to round2
+      currentPhaseRef.current = 'round2';
+
       actor.send({
         type: 'RX_COMMITMENTS_SET',
         commitments: internalCommitments,
@@ -811,6 +842,10 @@ export function useSigning(): UseSigningResult {
       } as ParticipantEvent);
     } else if (isMessageType(msg, 'SIGNATURE_RESULT')) {
       const payload = msg.payload;
+
+      // Update phase to complete
+      currentPhaseRef.current = 'complete';
+
       actor.send({
         type: 'RX_SIGNATURE_RESULT',
         signature: payload.signature,
@@ -824,7 +859,7 @@ export function useSigning(): UseSigningResult {
         message: payload.message,
       } as ParticipantEvent);
     }
-  }, [state.backendId]);
+  }, []);
 
   // ==========================================================================
   // Common Actions
@@ -863,8 +898,12 @@ export function useSigning(): UseSigningResult {
       participantActorRef.current = null;
     }
 
-    // Reset deduplication set
+    // Reset deduplication set and validation context
     dedupeSetRef.current = new DeduplicationSet();
+    sessionIdRef.current = null;
+    expectedMessageIdRef.current = null;
+    backendIdRef.current = 'ed25519';
+    currentPhaseRef.current = 'idle';
 
     // Reset state
     setState({
