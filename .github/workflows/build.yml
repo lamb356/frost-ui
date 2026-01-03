@@ -3,6 +3,8 @@ name: Build and Test
 on:
   push:
     branches: [main, master]
+    paths-ignore:
+      - 'src/lib/**/pkg/**'
   pull_request:
     branches: [main, master]
 
@@ -109,7 +111,7 @@ jobs:
   commit-wasm:
     name: Commit WASM
     runs-on: ubuntu-latest
-    needs: build-wasm
+    needs: [build-wasm, test-nextjs]
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
 
     steps:
