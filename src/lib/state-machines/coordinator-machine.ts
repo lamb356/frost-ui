@@ -104,7 +104,7 @@ export type CoordinatorErrorCode =
 
 export type CoordinatorEvent =
   | { type: 'UI_START'; participantPubkeys: string[]; threshold: number }
-  | { type: 'UI_START_SIGNING'; message: string; signerIds: number[]; messageId: string }
+  | { type: 'UI_START_SIGNING'; message: string; signerIds: number[]; messageId: string; backendId: BackendId; publicKeyPackage: string; groupPublicKey: string }
   | { type: 'UI_CANCEL' }
   | { type: 'UI_RESET' }
   | { type: 'RX_ROUND1_COMMITMENT'; participantId: number; hiding: string; binding: string }
@@ -278,7 +278,10 @@ export const coordinatorMachine = createMachine({
           actions: assign({
             message: ({ event }) => event.message,
             selectedSignerIds: ({ event }) => event.signerIds,
-            messageId: ({ event }) => event.messageId,  // Use messageId from useSigning
+            messageId: ({ event }) => event.messageId,
+            backendId: ({ event }) => event.backendId,
+            publicKeyPackage: ({ event }) => event.publicKeyPackage,
+            groupPublicKey: ({ event }) => event.groupPublicKey,
             commitments: () => new Map(),
             signatureShares: () => new Map(),
             phase: () => 'round1' as ProtocolPhase,

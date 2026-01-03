@@ -27,10 +27,24 @@ export type { BackendId };
 export const PROTOCOL_VERSION = 1;
 
 /**
+ * Map from message type to payload type.
+ * Defined early so MessageEnvelope can reference it.
+ */
+export interface MessagePayloadMap {
+  SIGNING_PACKAGE: SigningPackagePayload;
+  ROUND1_COMMITMENT: Round1CommitmentPayload;
+  COMMITMENTS_SET: CommitmentsSetPayload;
+  ROUND2_SIGNATURE_SHARE: Round2SignatureSharePayload;
+  SIGNATURE_RESULT: SignatureResultPayload;
+  ABORT: AbortPayload;
+}
+
+/**
  * Wire envelope format for all FROST protocol messages.
  * Every message transmitted via frostd uses this structure.
+ * The generic T is the MessageType, which determines the payload type.
  */
-export interface MessageEnvelope<T = unknown> {
+export interface MessageEnvelope<T extends MessageType = MessageType> {
   /** Protocol version (currently 1) */
   v: typeof PROTOCOL_VERSION;
   /** frostd session_id - binds message to specific session */
@@ -38,13 +52,13 @@ export interface MessageEnvelope<T = unknown> {
   /** Unique message UUID - for deduplication */
   id: string;
   /** Message type discriminator */
-  t: MessageType;
+  t: T;
   /** Sender's public key (hex-encoded, 64 chars) */
   from: string;
   /** Timestamp in milliseconds since epoch */
   ts: number;
   /** Message-specific payload */
-  payload: T;
+  payload: MessagePayloadMap[T];
 }
 
 /**
@@ -201,35 +215,24 @@ export type AbortReason =
 // =============================================================================
 
 /**
- * Type-safe union of all message envelope types.
+ * Type-safe discriminated union of all message envelope types.
  */
 export type FrostMessage =
-  | MessageEnvelope<SigningPackagePayload>
-  | MessageEnvelope<Round1CommitmentPayload>
-  | MessageEnvelope<CommitmentsSetPayload>
-  | MessageEnvelope<Round2SignatureSharePayload>
-  | MessageEnvelope<SignatureResultPayload>
-  | MessageEnvelope<AbortPayload>;
-
-/**
- * Map from message type to payload type.
- */
-export interface MessagePayloadMap {
-  SIGNING_PACKAGE: SigningPackagePayload;
-  ROUND1_COMMITMENT: Round1CommitmentPayload;
-  COMMITMENTS_SET: CommitmentsSetPayload;
-  ROUND2_SIGNATURE_SHARE: Round2SignatureSharePayload;
-  SIGNATURE_RESULT: SignatureResultPayload;
-  ABORT: AbortPayload;
-}
+  | MessageEnvelope<'SIGNING_PACKAGE'>
+  | MessageEnvelope<'ROUND1_COMMITMENT'>
+  | MessageEnvelope<'COMMITMENTS_SET'>
+  | MessageEnvelope<'ROUND2_SIGNATURE_SHARE'>
+  | MessageEnvelope<'SIGNATURE_RESULT'>
+  | MessageEnvelope<'ABORT'>;
 
 /**
  * Type guard for specific message types.
+ * Narrows the message to a specific envelope type.
  */
 export function isMessageType<T extends MessageType>(
-  msg: MessageEnvelope<unknown>,
+  msg: MessageEnvelope,
   type: T
-): msg is MessageEnvelope<MessagePayloadMap[T]> {
+): msg is MessageEnvelope<T> {
   return msg.t === type;
 }
 
@@ -252,7 +255,7 @@ export function createMessage<T extends MessageType>(
   sessionId: string,
   fromPubkey: string,
   payload: MessagePayloadMap[T]
-): MessageEnvelope<MessagePayloadMap[T]> {
+): MessageEnvelope<T> {
   return {
     v: PROTOCOL_VERSION,
     sid: sessionId,
@@ -261,7 +264,7 @@ export function createMessage<T extends MessageType>(
     from: fromPubkey,
     ts: Date.now(),
     payload,
-  };
+  } as MessageEnvelope<T>;
 }
 
 /**
@@ -275,7 +278,7 @@ export function createSigningPackage(
   messageToSign: string,
   selectedSigners: string[],
   signerIds: number[]
-): MessageEnvelope<SigningPackagePayload> {
+): MessageEnvelope<'SIGNING_PACKAGE'> {
   return createMessage('SIGNING_PACKAGE', sessionId, fromPubkey, {
     backendId,
     message_id: messageId,
@@ -293,7 +296,7 @@ export function createRound1Commitment(
   fromPubkey: string,
   messageId: string,
   commitment: WasmCommitment
-): MessageEnvelope<Round1CommitmentPayload> {
+): MessageEnvelope<'ROUND1_COMMITMENT'> {
   return createMessage('ROUND1_COMMITMENT', sessionId, fromPubkey, {
     message_id: messageId,
     signer_id: fromPubkey,
@@ -312,7 +315,7 @@ export function createCommitmentsSet(
   signingPackage: string,
   randomizer: string,
   groupPublicKey: string
-): MessageEnvelope<CommitmentsSetPayload> {
+): MessageEnvelope<'COMMITMENTS_SET'> {
   return createMessage('COMMITMENTS_SET', sessionId, fromPubkey, {
     message_id: messageId,
     commitments,
@@ -330,7 +333,7 @@ export function createRound2SignatureShare(
   fromPubkey: string,
   messageId: string,
   share: WasmSignatureShare
-): MessageEnvelope<Round2SignatureSharePayload> {
+): MessageEnvelope<'ROUND2_SIGNATURE_SHARE'> {
   return createMessage('ROUND2_SIGNATURE_SHARE', sessionId, fromPubkey, {
     message_id: messageId,
     signer_id: fromPubkey,
@@ -350,7 +353,7 @@ export function createSignatureResult(
   groupPublicKey: string,
   verified: boolean,
   randomizer?: string
-): MessageEnvelope<SignatureResultPayload> {
+): MessageEnvelope<'SIGNATURE_RESULT'> {
   return createMessage('SIGNATURE_RESULT', sessionId, fromPubkey, {
     message_id: messageId,
     backendId,
@@ -371,7 +374,7 @@ export function createAbort(
   message: string,
   messageId?: string,
   details?: Record<string, unknown>
-): MessageEnvelope<AbortPayload> {
+): MessageEnvelope<'ABORT'> {
   return createMessage('ABORT', sessionId, fromPubkey, {
     message_id: messageId,
     reason,

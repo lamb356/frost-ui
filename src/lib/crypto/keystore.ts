@@ -50,6 +50,8 @@ export interface StoredFrostShare {
   publicKeyShare: string;
   /** Group public key */
   groupPublicKey: string;
+  /** Public key package (JSON) - needed for coordinator to aggregate */
+  publicKeyPackage?: string;
   /** Threshold required */
   threshold: number;
   /** Total participants */
@@ -180,6 +182,7 @@ export async function saveFrostShare(
     secretShare: string;
     publicKeyShare: string;
     groupPublicKey: string;
+    publicKeyPackage?: string;
     threshold: number;
     totalParticipants: number;
     name: string;
@@ -197,6 +200,7 @@ export async function saveFrostShare(
     nonce: encrypted.nonce,
     publicKeyShare: share.publicKeyShare,
     groupPublicKey: share.groupPublicKey,
+    publicKeyPackage: share.publicKeyPackage,
     threshold: share.threshold,
     totalParticipants: share.totalParticipants,
     name: share.name,
@@ -231,6 +235,7 @@ export async function loadFrostShare(
   secretShare: string;
   publicKeyShare: string;
   groupPublicKey: string;
+  publicKeyPackage?: string;
   threshold: number;
   totalParticipants: number;
   name: string;
@@ -255,6 +260,7 @@ export async function loadFrostShare(
     secretShare,
     publicKeyShare: share.publicKeyShare,
     groupPublicKey: share.groupPublicKey,
+    publicKeyPackage: share.publicKeyPackage,
     threshold: share.threshold,
     totalParticipants: share.totalParticipants,
     name: share.name,
@@ -291,6 +297,7 @@ export function getStoredFrostSharesInfo(): Array<{
   threshold: number;
   totalParticipants: number;
   groupPublicKey: string;
+  publicKeyPackage?: string;
   createdAt: number;
 }> {
   return getStoredFrostSharesList().map((share) => ({
@@ -300,6 +307,7 @@ export function getStoredFrostSharesInfo(): Array<{
     threshold: share.threshold,
     totalParticipants: share.totalParticipants,
     groupPublicKey: share.groupPublicKey,
+    publicKeyPackage: share.publicKeyPackage,
     createdAt: share.createdAt,
   }));
 }

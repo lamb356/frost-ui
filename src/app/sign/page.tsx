@@ -409,15 +409,54 @@ function CreatingSession() {
   );
 }
 
+interface StoredGroupInfo {
+  groupId: string;
+  name: string;
+  participantId: number;
+  threshold: number;
+  totalParticipants: number;
+  groupPublicKey: string;
+  publicKeyPackage?: string;
+  createdAt: number;
+}
+
 function CoordinatorWaiting({ signing }: { signing: ReturnType<typeof useSigning> }) {
   const { state } = signing;
   const [messageToSign, setMessageToSign] = useState('');
   const [signerIds, setSignerIds] = useState<number[]>([1, 2]);
+  const [availableGroups, setAvailableGroups] = useState<StoredGroupInfo[]>([]);
+  const [selectedGroupId, setSelectedGroupId] = useState<string>('');
 
-  const canStart = messageToSign.length >= 2;
+  // Load available groups on mount
+  useEffect(() => {
+    const groups = getStoredFrostSharesInfo();
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setAvailableGroups(groups);
+  }, []);
+
+  // Auto-select first group when groups are loaded and nothing selected
+  useEffect(() => {
+    if (availableGroups.length > 0 && !selectedGroupId) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setSelectedGroupId(availableGroups[0].groupId);
+    }
+  }, [availableGroups, selectedGroupId]);
+
+  const selectedGroup = availableGroups.find(g => g.groupId === selectedGroupId);
+  const hasValidGroup = selectedGroup && selectedGroup.publicKeyPackage;
+  const canStart = messageToSign.length >= 2 && hasValidGroup;
 
   const handleStart = () => {
-    signing.startSigning(messageToSign, signerIds);
+    if (!selectedGroup) return;
+
+    const publicKeyPackage = selectedGroup.publicKeyPackage || '';
+    const groupPublicKey = selectedGroup.groupPublicKey;
+
+    if (!publicKeyPackage) {
+      console.warn('No publicKeyPackage for selected group - aggregation may fail');
+    }
+
+    signing.startSigning(messageToSign, signerIds, publicKeyPackage, groupPublicKey);
   };
 
   return (
@@ -430,6 +469,45 @@ function CoordinatorWaiting({ signing }: { signing: ReturnType<typeof useSigning
           <code className="text-amber-400 font-mono break-all">{state.sessionId}</code>
         </div>
       )}
+
+      {/* Group Selection */}
+      <div className="mb-6">
+        <label className="block text-sm font-medium text-gray-300 mb-2">
+          Select Signing Group
+        </label>
+        {availableGroups.length === 0 ? (
+          <div className="p-4 rounded-xl bg-yellow-500/10 border border-yellow-500/30">
+            <p className="text-yellow-400 text-sm">
+              No groups found. Create a group first or import a key share.
+            </p>
+          </div>
+        ) : (
+          <select
+            value={selectedGroupId}
+            onChange={(e) => setSelectedGroupId(e.target.value)}
+            className="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-xl text-white focus:outline-none focus:border-amber-500"
+          >
+            {availableGroups.map((group) => (
+              <option key={group.groupId} value={group.groupId}>
+                {group.name} ({group.threshold}/{group.totalParticipants})
+                {!group.publicKeyPackage && ' ⚠️ No key package'}
+              </option>
+            ))}
+          </select>
+        )}
+        {selectedGroup && (
+          <div className="mt-2 p-3 rounded-lg bg-gray-800/50 text-xs">
+            <p className="text-gray-400">
+              Group Key: <span className="text-amber-400 font-mono">{selectedGroup.groupPublicKey.slice(0, 16)}...</span>
+            </p>
+            {!selectedGroup.publicKeyPackage && (
+              <p className="text-yellow-400 mt-1">
+                Warning: This group is missing publicKeyPackage. Signature aggregation may fail.
+              </p>
+            )}
+          </div>
+        )}
+      </div>
 
       <div className="mb-6">
         <label className="block text-sm font-medium text-gray-300 mb-2">

@@ -102,7 +102,7 @@ export interface UseSigningResult {
     threshold: number,
     backendId: BackendId
   ) => Promise<void>;
-  startSigning: (message: string, signerIds: number[]) => void;
+  startSigning: (message: string, signerIds: number[], publicKeyPackage: string, groupPublicKey: string) => void;
   // Participant actions
   startAsParticipant: (sessionId: string, groupId: string, password: string) => Promise<void>;
   confirmSigning: () => void;
@@ -414,7 +414,7 @@ export function useSigning(): UseSigningResult {
     [client, pubkey]
   );
 
-  const startSigning = useCallback((message: string, signerIds: number[]) => {
+  const startSigning = useCallback((message: string, signerIds: number[], publicKeyPackage: string, groupPublicKey: string) => {
     const actor = coordinatorActorRef.current;
     if (!actor) return;
 
@@ -448,7 +448,16 @@ export function useSigning(): UseSigningResult {
       client.send(ctx.sessionId, recipients, hexMsg);
     }
 
-    actor.send({ type: 'UI_START_SIGNING', message, signerIds, messageId });
+    // Pass backendId, publicKeyPackage, groupPublicKey to coordinator machine
+    actor.send({
+      type: 'UI_START_SIGNING',
+      message,
+      signerIds,
+      messageId,
+      backendId: state.backendId,
+      publicKeyPackage,
+      groupPublicKey,
+    });
   }, [client, pubkey, state.backendId]);
 
   // ==========================================================================
