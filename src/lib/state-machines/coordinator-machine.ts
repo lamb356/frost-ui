@@ -528,7 +528,7 @@ export const coordinatorMachine = createMachine({
             context.messageId || undefined,
             context.error?.details
           ),
-          recipients: context.participantPubkeys,
+          recipients: context.participantPubkeys.filter((p) => p !== context.coordinatorPubkey),
         }),
         onDone: { target: 'closing' },
         onError: { target: 'closing' },

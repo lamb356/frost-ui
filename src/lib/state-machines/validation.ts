@@ -250,7 +250,7 @@ const MESSAGE_PHASE_REQUIREMENTS: Record<MessageType, ProtocolPhase[]> = {
   SIGNING_PACKAGE: ['idle'],
   ROUND1_COMMITMENT: ['round1'],
   COMMITMENTS_SET: ['round1'],
-  ROUND2_SIGNATURE_SHARE: ['round2'],
+  ROUND2_SIGNATURE_SHARE: ['commitments_sent', 'round2'], // Accept during broadcast window
   SIGNATURE_RESULT: ['round2'],
   ABORT: ['idle', 'round1', 'commitments_sent', 'round2'], // Can abort anytime
 };
@@ -950,21 +950,7 @@ export function validateMessage(
     }
   }
 
-  // Step 4: Check deduplication
-  if (dedupeSet) {
-    if (!dedupeSet.markSeen(msg.sid, msg.id)) {
-      return {
-        valid: false,
-        error: {
-          code: 'DUPLICATE_MESSAGE',
-          message: 'Message already processed',
-          details: { messageId: msg.id },
-        },
-      };
-    }
-  }
-
-  // Step 5: Check monotonicity
+  // Step 4: Check monotonicity (phase check BEFORE dedupe to avoid burning messages)
   if (currentPhase) {
     if (!isValidForPhase(msg.t, currentPhase)) {
       return {
@@ -973,6 +959,20 @@ export function validateMessage(
           code: 'MONOTONICITY_VIOLATION',
           message: `Cannot receive ${msg.t} message in ${currentPhase} phase`,
           details: { messageType: msg.t, currentPhase },
+        },
+      };
+    }
+  }
+
+  // Step 5: Check deduplication (after phase check so rejected messages can be retried)
+  if (dedupeSet) {
+    if (!dedupeSet.markSeen(msg.sid, msg.id)) {
+      return {
+        valid: false,
+        error: {
+          code: 'DUPLICATE_MESSAGE',
+          message: 'Message already processed',
+          details: { messageId: msg.id },
         },
       };
     }
