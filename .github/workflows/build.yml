@@ -70,12 +70,12 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@1.83.0
+        uses: dtolnay/rust-toolchain@1.88.0
         with:
           targets: wasm32-unknown-unknown
 
       - name: Install wasm-pack
-        run: cargo install wasm-pack --version 0.13.1
+        run: cargo install wasm-pack --version 0.13.1 --locked
 
       - name: Build FROST WASM module (Ed25519)
         working-directory: src/lib/frost-wasm
