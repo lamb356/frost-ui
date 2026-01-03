@@ -152,7 +152,7 @@ npm run test:zcash-live -- https://localhost:2745
 
 | Suite | Tests | CI | Description |
 |-------|-------|-----|-------------|
-| Zcash WASM | 9 | Yes | Local cryptographic correctness |
+| Zcash WASM | 9 | ✅ | Local cryptographic correctness |
 | Ed25519 Live | 33 | Manual | Full ceremony against frostd |
 | Zcash Live | 34 | Manual | Full Orchard ceremony against frostd |
 | **Total** | **76+** | | |
