@@ -419,15 +419,17 @@ async function main() {
   const messageToSign = 'deadbeefcafebabe'; // Test message (hex)
   const messageId = generateUUID();
 
-  const signingPackage = createEnvelope(sessionId, 'SIGNING_PACKAGE', coordinator.publicKey, {
+  const signingPackageEnvelope = createEnvelope(sessionId, 'SIGNING_PACKAGE', coordinator.publicKey, {
+    backendId: 'ed25519',
     message_id: messageId,
     message_to_sign: messageToSign,
     selected_signers: signers.map((s) => s.publicKey),
+    signer_ids: signers.map((s) => participantIdentifiers[s.publicKey]),
   });
 
   // Send to each signer with E2E encryption
   for (const signer of signers) {
-    const plaintext = new TextEncoder().encode(JSON.stringify(signingPackage));
+    const plaintext = new TextEncoder().encode(JSON.stringify(signingPackageEnvelope));
     const encrypted = await encryptMessage(
       hexToBytes(coordinator.privateKey),
       hexToBytes(signer.publicKey),
@@ -644,6 +646,13 @@ async function main() {
   console.log('STEP 10: Coordinator Broadcasts COMMITMENTS_SET');
   console.log('─'.repeat(70));
 
+  // For Ed25519, construct signing_package from message and commitments
+  // (Orchard uses backend.createSigningPackage() which also returns a randomizer)
+  const signingPackageJson = JSON.stringify({
+    message: messageToSign,
+    commitments: collectedCommitments,
+  });
+
   const commitmentsSetEnvelope = createEnvelope(
     sessionId,
     'COMMITMENTS_SET',
@@ -651,6 +660,9 @@ async function main() {
     {
       message_id: messageId,
       commitments: collectedCommitments,
+      signing_package: signingPackageJson,
+      randomizer: '', // Empty for Ed25519 (only Orchard uses randomizer)
+      group_public_key: groupPublicKey,
     }
   );
 
@@ -909,8 +921,10 @@ async function main() {
 
   const resultEnvelope = createEnvelope(sessionId, 'SIGNATURE_RESULT', coordinator.publicKey, {
     message_id: messageId,
+    backendId: 'ed25519',
     signature: finalSignature,
     group_public_key: groupPublicKey,
+    randomizer: '', // Empty for Ed25519
     verified: verifyResult.valid,
   });
 
