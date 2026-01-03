@@ -40,7 +40,7 @@ A Next.js web application for FROST (Flexible Round-Optimized Schnorr Threshold)
 
 ### Prerequisites
 
-- Node.js 18+ (CI uses Node 20)
+- Node.js 20+ (required by dependencies)
 - npm or yarn
 
 ### Installation
@@ -79,12 +79,20 @@ rustup target add wasm32-unknown-unknown
 
 See [WASM-INTEGRATION.md](./WASM-INTEGRATION.md) for Windows-specific instructions.
 
-### CI/CD
+### CI/CD Pipeline
 
-WASM is automatically built on push via GitHub Actions. The workflow:
-1. Builds and tests the Next.js application
-2. Compiles WASM on Ubuntu (avoiding Windows toolchain issues)
-3. Uploads WASM artifacts for use in deployments
+The CI workflow automatically builds WASM modules and commits them back to the repository. This ensures:
+- Consistent WASM builds across all contributors
+- No local Rust toolchain required for frontend development
+- Reproducible builds (Rust 1.88.0 + wasm-pack 0.13.1 pinned)
+
+The workflow only runs on `main` branch pushes and requires all tests to pass before committing artifacts.
+
+**Pipeline steps:**
+1. Builds WASM modules on Ubuntu (avoiding Windows toolchain issues)
+2. Runs linter and builds Next.js application
+3. Runs automated tests against WASM modules
+4. Commits WASM artifacts back to repository (main branch only)
 
 ## Project Structure
 
