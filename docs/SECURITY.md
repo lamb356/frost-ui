@@ -2,6 +2,34 @@
 
 This document describes the threat model and security properties of the FROST multi-signature UI.
 
+## Reporting Vulnerabilities
+
+If you discover a security vulnerability, please report it responsibly:
+
+**Email**: security@example.com (replace with your contact)
+**Response Time**: <48 hours for initial acknowledgment
+**Resolution Target**: Critical issues patched within 7 days
+
+### Disclosure Process
+
+1. Report via email with detailed description
+2. We acknowledge within 48 hours
+3. We investigate and provide timeline
+4. We release patch and coordinate disclosure
+5. Credit given to reporter (unless anonymity requested)
+
+### Scope
+
+Security issues in scope:
+- Cryptographic implementation flaws
+- Key material exposure
+- Authentication bypass
+- Message replay/forgery
+
+Out of scope:
+- Denial of service (frostd server responsibility)
+- Social engineering
+
 ## Threat Model Overview
 
 | Threat | Mitigation | Status |
