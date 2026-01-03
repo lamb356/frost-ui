@@ -352,6 +352,7 @@ export function useSigning(): UseSigningResult {
           switch (stateName) {
             case 'idle':
               phase = 'idle';
+              currentPhaseRef.current = 'idle';
               break;
             case 'creatingSession':
               phase = 'creating_session';
@@ -361,10 +362,15 @@ export function useSigning(): UseSigningResult {
               break;
             case 'round1Collect':
               phase = 'round1_collect';
+              currentPhaseRef.current = 'round1';
               break;
             case 'round2Send':
+              phase = 'round2_collect';
+              currentPhaseRef.current = 'commitments_sent';
+              break;
             case 'round2Collect':
               phase = 'round2_collect';
+              currentPhaseRef.current = 'round2';
               break;
             case 'aggregating':
               phase = 'aggregating';
@@ -372,6 +378,7 @@ export function useSigning(): UseSigningResult {
             case 'broadcasting':
             case 'complete':
               phase = 'complete';
+              currentPhaseRef.current = 'complete';
               break;
             case 'failed':
               phase = 'failed';

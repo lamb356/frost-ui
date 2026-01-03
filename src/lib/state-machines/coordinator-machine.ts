@@ -388,7 +388,7 @@ export const coordinatorMachine = createMachine({
               context.randomizer || '',       // Set by useSigning after calling backend.createSigningPackage()
               context.groupPublicKey || ''    // Set from stored group's publicKeyPackage
             ),
-            recipients: context.participantPubkeys,
+            recipients: context.participantPubkeys.filter((p) => p !== context.coordinatorPubkey),
           };
         },
         onDone: { target: 'round2Collect' },
@@ -502,7 +502,7 @@ export const coordinatorMachine = createMachine({
             context.verified,
             context.randomizer || undefined
           ),
-          recipients: context.participantPubkeys,
+          recipients: context.participantPubkeys.filter((p) => p !== context.coordinatorPubkey),
         }),
         onDone: { target: 'complete' },
         onError: { target: 'complete' }, // Still complete - signature is valid
