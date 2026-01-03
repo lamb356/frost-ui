@@ -4,15 +4,20 @@ This document describes the threat model and security properties of the FROST mu
 
 ## Reporting Vulnerabilities
 
-If you discover a security vulnerability, please report it responsibly:
+Please report security vulnerabilities through GitHub's Security Advisory feature:
 
-**Email**: security@example.com (replace with your contact)
+1. Go to https://github.com/lamb356/frost-ui/security/advisories
+2. Click "New draft security advisory"
+3. Provide detailed description of the vulnerability
+
 **Response Time**: <48 hours for initial acknowledgment
 **Resolution Target**: Critical issues patched within 7 days
 
+Alternatively, open a private security report via GitHub's "Report a vulnerability" button on the Security tab.
+
 ### Disclosure Process
 
-1. Report via email with detailed description
+1. Report via GitHub Security Advisory
 2. We acknowledge within 48 hours
 3. We investigate and provide timeline
 4. We release patch and coordinate disclosure
