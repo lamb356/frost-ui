@@ -1,5 +1,7 @@
 # FROST Multi-Sig UI
 
+![Build Status](https://github.com/lamb356/frost-ui/actions/workflows/build.yml/badge.svg)
+
 A Next.js web application for FROST (Flexible Round-Optimized Schnorr Threshold) multi-signature operations, designed for Zcash threshold signing ceremonies.
 
 ## Features
@@ -123,6 +125,23 @@ npm run lint
 # Build for production
 npm run build
 ```
+
+## Testing
+
+The project includes comprehensive test suites:
+
+```bash
+# Ed25519 signing ceremony against live frostd (33 tests)
+npx tsx scripts/test-ceremony.ts https://localhost:2745
+
+# Zcash/Orchard local WASM test (9 tests)
+npx tsx scripts/test-zcash-ceremony.ts
+
+# Zcash/Orchard signing ceremony against live frostd (34 tests)
+npx tsx scripts/test-zcash-ceremony-live.ts https://localhost:2745
+```
+
+Total: 76+ tests covering cryptographic correctness and protocol flow.
 
 ## Testing with frostd
 
